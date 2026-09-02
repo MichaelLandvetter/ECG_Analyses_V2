@@ -9,7 +9,7 @@ from typing import Optional
 from ecg_acquisition import acquire_ecg_signal
 from ecg_analysis import NeuroKit2UnavailableError, analyze_ecg
 from ecg_config import DEFAULT_OUTPUT_DIR, DEFAULT_SAMPLING_RATE, DEFAULT_SYNTHETIC_DURATION_SECONDS
-from ecg_report import build_text_summary, save_reports
+from ecg_report import save_reports
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,10 +61,10 @@ def run(input_file: Optional[str], sampling_rate: int, duration_seconds: int, ou
         write_json=not no_json,
     )
 
-    print(build_text_summary(results, source=source))
-    print("\nSaved outputs:")
+    print("ECG analysis completed successfully.")
+    print("Saved outputs:")
     for key, path in report_paths.items():
-        print(f"- {key}: {path}")
+        print(f"- {key}: {path.name}")
 
     return 0
 
