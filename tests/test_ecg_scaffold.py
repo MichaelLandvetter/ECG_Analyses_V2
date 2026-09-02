@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from ecg_acquisition import generate_synthetic_ecg
-from ecg_analysis import NeuroKit2UnavailableError, analyze_ecg
+from ecg_analysis import NeuroKit2UnavailableError, analyze_ecg, detect_r_peaks, validate_filter_settings
 
 
 class TestECGScaffold(unittest.TestCase):
@@ -29,6 +29,15 @@ class TestECGScaffold(unittest.TestCase):
         self.assertIn("metrics", result)
         self.assertIn("artifacts", result)
         self.assertIn("mean_heart_rate_bpm", result["metrics"])
+
+    def test_validate_filter_settings_rejects_invalid_high_cut(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_filter_settings(low_cut_hz=0.5, high_cut_hz=130.0, sampling_rate=250)
+
+    def test_detect_r_peaks_rejects_unsupported_method(self) -> None:
+        signal = generate_synthetic_ecg(duration_seconds=4, sampling_rate=250)
+        with self.assertRaises(ValueError):
+            detect_r_peaks(signal=signal, sampling_rate=250, method="unsupported_method")
 
 
 if __name__ == "__main__":
