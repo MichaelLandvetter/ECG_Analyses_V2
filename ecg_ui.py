@@ -1,11 +1,10 @@
-"""Tkinter desktop UI for ECG acquisition and analysis flow."""
+"""PyQt6 desktop UI for ECG acquisition and analysis flow."""
 
 from __future__ import annotations
 
-import tkinter as tk
+import sys
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 import numpy as np
@@ -29,356 +28,423 @@ from ecg_config import (
 )
 from ecg_report import save_pre_report
 
+PYQT6_IMPORT_ERROR: Exception | None = None
+PYQTGRAPH_IMPORT_ERROR: Exception | None = None
+
 try:
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
+    from PyQt6.QtWidgets import (
+        QApplication,
+        QComboBox,
+        QFileDialog,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QMainWindow,
+        QMessageBox,
+        QPushButton,
+        QTabWidget,
+        QVBoxLayout,
+        QWidget,
+    )
 
-    MATPLOTLIB_AVAILABLE = True
-except Exception:
-    Figure = Any  # type: ignore[assignment]
-    FigureCanvasTkAgg = Any  # type: ignore[assignment]
-    MATPLOTLIB_AVAILABLE = False
+    PYQT6_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - env dependent
+    PYQT6_IMPORT_ERROR = exc
+    PYQT6_AVAILABLE = False
+
+try:
+    import pyqtgraph as pg
+
+    PYQTGRAPH_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - env dependent
+    PYQTGRAPH_IMPORT_ERROR = exc
+    PYQTGRAPH_AVAILABLE = False
 
 
-class ECGDesktopApp(ttk.Frame):
-    """Desktop UI for running the clean ECG analysis skeleton."""
+def _get_missing_ui_dependency_message() -> str | None:
+    """Return a user-facing message when optional UI dependencies are unavailable."""
+    missing: list[str] = []
+    details: list[str] = []
 
-    def __init__(self, master: tk.Tk) -> None:
-        super().__init__(master, padding=10)
-        self.master.title("ECG Analysis")
-        self.master.geometry("1300x820")
-        self.pack(fill=tk.BOTH, expand=True)
+    if not PYQT6_AVAILABLE:
+        missing.append("PyQt6")
+        if PYQT6_IMPORT_ERROR is not None:
+            details.append(f"PyQt6 import error: {PYQT6_IMPORT_ERROR}")
 
-        self.source_var = tk.StringVar(value=DEFAULT_INPUT_SOURCE)
-        self.file_status_var = tk.StringVar(value="No file selected")
-        self.filter_mode_var = tk.StringVar(value=DEFAULT_FILTER_MODE)
-        self.low_cut_var = tk.StringVar(value=str(DEFAULT_FILTER_LOW_CUT_HZ))
-        self.high_cut_var = tk.StringVar(value=str(DEFAULT_FILTER_HIGH_CUT_HZ))
-        self.rpeak_method_var = tk.StringVar(value=DEFAULT_RPEAK_METHOD)
-        self.status_var = tk.StringVar(value="Ready")
+    if not PYQTGRAPH_AVAILABLE:
+        missing.append("pyqtgraph")
+        if PYQTGRAPH_IMPORT_ERROR is not None:
+            details.append(f"pyqtgraph import error: {PYQTGRAPH_IMPORT_ERROR}")
 
-        self.selected_file: str | None = None
-        self.acquisition_running = False
-        self.filter_armed = False
-        self.latest_results: dict[str, Any] | None = None
-        self.latest_source = ""
+    if not missing:
+        return None
 
-        self._build_layout()
-        self._set_initial_plots()
-        self._on_source_mode_changed()
+    message = (
+        "Desktop UI dependencies are missing: "
+        + ", ".join(missing)
+        + ". Install them with `pip install PyQt6 pyqtgraph`."
+    )
+    if details:
+        message += "\n" + "\n".join(details)
+    return message
 
-    def _build_layout(self) -> None:
-        top_controls = ttk.Frame(self)
-        top_controls.grid(row=0, column=0, sticky="ew")
-        for column in range(5):
-            top_controls.columnconfigure(column, weight=1)
 
-        self._build_source_controls(top_controls)
-        self._build_file_controls(top_controls)
-        self._build_filter_controls(top_controls)
-        self._build_rpeak_controls(top_controls)
-        self._build_action_controls(top_controls)
+if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+    class ECGDesktopApp(QMainWindow):
+        """Desktop UI for running the clean ECG analysis skeleton."""
 
-        analysis_view = ttk.Frame(self.notebook, padding=8)
-        processing_settings = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(analysis_view, text="Analysis View")
-        self.notebook.add(processing_settings, text="ECG Processing Settings")
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("ECG Analysis")
+            self.resize(1300, 820)
 
-        self._build_analysis_tab(analysis_view)
-        self._build_settings_tab(processing_settings)
-
-        status_label = ttk.Label(self, textvariable=self.status_var, anchor="w")
-        status_label.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-
-    def _build_source_controls(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text="File or USB Input", padding=8)
-        frame.grid(row=0, column=0, sticky="nsew", padx=4)
-
-        source_selector = ttk.Combobox(
-            frame,
-            textvariable=self.source_var,
-            values=("File Replay", "USB Input"),
-            state="readonly",
-        )
-        source_selector.grid(row=0, column=0, sticky="ew")
-        source_selector.bind("<<ComboboxSelected>>", lambda _event: self._on_source_mode_changed())
-        frame.columnconfigure(0, weight=1)
-
-    def _build_file_controls(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text="ECG Data File", padding=8)
-        frame.grid(row=0, column=1, sticky="nsew", padx=4)
-
-        ttk.Label(frame, textvariable=self.file_status_var, wraplength=220).grid(row=0, column=0, sticky="w")
-        self.file_button = ttk.Button(frame, text="Choose ECG File", command=self._select_ecg_file)
-        self.file_button.grid(row=1, column=0, sticky="w", pady=(6, 0))
-        frame.columnconfigure(0, weight=1)
-
-    def _build_filter_controls(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text="ECG Filter Settings", padding=8)
-        frame.grid(row=0, column=2, sticky="nsew", padx=4)
-
-        mode_selector = ttk.Combobox(
-            frame,
-            textvariable=self.filter_mode_var,
-            values=("Butterworth bandpass",),
-            state="readonly",
-        )
-        mode_selector.grid(row=0, column=0, columnspan=2, sticky="ew")
-
-        ttk.Label(frame, text="Low cut (Hz):").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(frame, textvariable=self.low_cut_var, width=9).grid(row=1, column=1, sticky="ew", pady=(6, 0))
-
-        ttk.Label(frame, text="High cut (Hz):").grid(row=2, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(frame, textvariable=self.high_cut_var, width=9).grid(row=2, column=1, sticky="ew", pady=(4, 0))
-
-        ttk.Button(frame, text="Apply Filter", command=self._arm_filter).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        frame.columnconfigure(1, weight=1)
-
-    def _build_rpeak_controls(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text="R-peak Detection", padding=8)
-        frame.grid(row=0, column=3, sticky="nsew", padx=4)
-
-        method_selector = ttk.Combobox(
-            frame,
-            textvariable=self.rpeak_method_var,
-            values=("neurokit", "pantompkins1985", "engzeemod2012", "hamilton2002"),
-            state="readonly",
-        )
-        method_selector.grid(row=0, column=0, sticky="ew")
-        frame.columnconfigure(0, weight=1)
-
-    def _build_action_controls(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text="Controls", padding=8)
-        frame.grid(row=0, column=4, sticky="nsew", padx=4)
-
-        ttk.Button(frame, text="Start", command=self._start_analysis).grid(row=0, column=0, sticky="ew")
-        ttk.Button(frame, text="Stop", command=self._stop_analysis).grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        ttk.Button(frame, text="Reset", command=self._reset_ui).grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        ttk.Button(frame, text="Open Pre-report", command=self._open_pre_report).grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        frame.columnconfigure(0, weight=1)
-
-    def _build_analysis_tab(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
-
-        if not MATPLOTLIB_AVAILABLE:
-            ttk.Label(
-                parent,
-                text="Matplotlib is not installed. Install matplotlib to render ECG plots.",
-                wraplength=900,
-            ).grid(row=0, column=0, sticky="nw")
-            self.figure = None
-            self.canvas = None
-            self.axes_ecg = None
-            self.axes_hr = None
-            return
-
-        self.figure = Figure(figsize=(11, 6), dpi=100)
-        self.axes_ecg = self.figure.add_subplot(211)
-        self.axes_hr = self.figure.add_subplot(212)
-        self.figure.tight_layout(pad=3.0)
-
-        self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
-        self.canvas.draw()
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-
-    def _build_settings_tab(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=1)
-        message = (
-            "This tab is reserved for additional acquisition and processing options. "
-            "Current controls are available in the top section for a clean, incremental build."
-        )
-        ttk.Label(parent, text=message, wraplength=900, justify="left").grid(row=0, column=0, sticky="nw")
-
-    def _set_initial_plots(self) -> None:
-        if not MATPLOTLIB_AVAILABLE or self.axes_ecg is None or self.axes_hr is None:
-            return
-        self.axes_ecg.clear()
-        self.axes_ecg.set_title("Raw ECG + Filtered ECG")
-        self.axes_ecg.set_ylabel("Amplitude")
-        self.axes_ecg.grid(True, alpha=0.3)
-        self.axes_ecg.text(0.5, 0.5, "No signal loaded", transform=self.axes_ecg.transAxes, ha="center", va="center")
-
-        self.axes_hr.clear()
-        self.axes_hr.set_title("Heart Rate — R-peak tachometer")
-        self.axes_hr.set_xlabel("Sample")
-        self.axes_hr.set_ylabel("BPM")
-        self.axes_hr.grid(True, alpha=0.3)
-        self.axes_hr.text(0.5, 0.5, "No analysis yet", transform=self.axes_hr.transAxes, ha="center", va="center")
-        self.canvas.draw()
-
-    def _on_source_mode_changed(self) -> None:
-        is_file_mode = self.source_var.get() == "File Replay"
-        state = tk.NORMAL if is_file_mode else tk.DISABLED
-        self.file_button.configure(state=state)
-        if not is_file_mode:
-            self.file_status_var.set("USB Input selected (placeholder)")
-        elif self.selected_file:
-            self.file_status_var.set(Path(self.selected_file).name)
-        else:
-            self.file_status_var.set("No file selected")
-
-    def _select_ecg_file(self) -> None:
-        file_path = filedialog.askopenfilename(
-            title="Select ECG data file",
-            filetypes=[("ECG files", "*.txt *.csv *.npy"), ("All files", "*.*")],
-        )
-        if not file_path:
-            return
-        self.selected_file = file_path
-        self.file_status_var.set(Path(file_path).name)
-        self.status_var.set(f"Selected file: {file_path}")
-
-    def _arm_filter(self) -> None:
-        try:
-            low_cut_hz = float(self.low_cut_var.get())
-            high_cut_hz = float(self.high_cut_var.get())
-            validate_filter_settings(
-                low_cut_hz=low_cut_hz,
-                high_cut_hz=high_cut_hz,
-                sampling_rate=DEFAULT_SAMPLING_RATE,
-            )
-        except ValueError as exc:
-            messagebox.showerror("Invalid filter settings", str(exc))
+            self.selected_file: str | None = None
+            self.acquisition_running = False
             self.filter_armed = False
-            return
+            self.latest_results: dict[str, Any] | None = None
+            self.latest_source = ""
 
-        self.filter_armed = True
-        self.status_var.set("Filter settings armed and will be applied on Start")
+            central_widget = QWidget(self)
+            self.setCentralWidget(central_widget)
+            self.root_layout = QVBoxLayout(central_widget)
 
-    def _start_analysis(self) -> None:
-        source_mode = self.source_var.get()
-        if source_mode == "USB Input":
-            messagebox.showinfo("USB Input", "USB Input is not implemented yet.")
-            self.status_var.set("USB Input placeholder selected")
-            return
+            self._build_layout()
+            self._set_initial_plots()
+            self._on_source_mode_changed()
 
-        if not self.selected_file:
-            messagebox.showerror("Missing ECG file", "Select an ECG data file before starting analysis.")
-            return
+        def _build_layout(self) -> None:
+            controls_container = QWidget()
+            controls_layout = QGridLayout(controls_container)
+            controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.acquisition_running = True
+            self._build_source_controls(controls_layout, 0)
+            self._build_file_controls(controls_layout, 1)
+            self._build_filter_controls(controls_layout, 2)
+            self._build_rpeak_controls(controls_layout, 3)
+            self._build_action_controls(controls_layout, 4)
 
-        try:
-            signal, source = acquire_ecg_signal(
-                input_file=self.selected_file,
-                sampling_rate=DEFAULT_SAMPLING_RATE,
-                duration_seconds=DEFAULT_SYNTHETIC_DURATION_SECONDS,
+            self.root_layout.addWidget(controls_container)
+
+            self.tabs = QTabWidget()
+            analysis_tab = QWidget()
+            analysis_layout = QVBoxLayout(analysis_tab)
+            self._build_analysis_tab(analysis_layout)
+
+            settings_tab = QWidget()
+            settings_layout = QVBoxLayout(settings_tab)
+            self._build_settings_tab(settings_layout)
+
+            self.tabs.addTab(analysis_tab, "Analysis View")
+            self.tabs.addTab(settings_tab, "ECG Processing Settings")
+            self.root_layout.addWidget(self.tabs)
+
+            self.status_label = QLabel("Ready")
+            self.root_layout.addWidget(self.status_label)
+
+        def _build_source_controls(self, parent: QGridLayout, column: int) -> None:
+            frame = QGroupBox("File or USB Input")
+            layout = QVBoxLayout(frame)
+
+            self.source_selector = QComboBox()
+            self.source_selector.addItems(["File Replay", "USB Input"])
+            self.source_selector.setCurrentText(DEFAULT_INPUT_SOURCE)
+            self.source_selector.currentTextChanged.connect(self._on_source_mode_changed)
+            layout.addWidget(self.source_selector)
+
+            parent.addWidget(frame, 0, column)
+
+        def _build_file_controls(self, parent: QGridLayout, column: int) -> None:
+            frame = QGroupBox("ECG Data File")
+            layout = QVBoxLayout(frame)
+
+            self.file_status_label = QLabel("No file selected")
+            self.file_status_label.setWordWrap(True)
+            layout.addWidget(self.file_status_label)
+
+            self.file_button = QPushButton("Choose ECG File")
+            self.file_button.clicked.connect(self._select_ecg_file)
+            layout.addWidget(self.file_button)
+
+            parent.addWidget(frame, 0, column)
+
+        def _build_filter_controls(self, parent: QGridLayout, column: int) -> None:
+            frame = QGroupBox("ECG Filter Settings")
+            layout = QGridLayout(frame)
+
+            self.filter_mode_selector = QComboBox()
+            self.filter_mode_selector.addItems(["Butterworth bandpass"])
+            self.filter_mode_selector.setCurrentText(DEFAULT_FILTER_MODE)
+            layout.addWidget(self.filter_mode_selector, 0, 0, 1, 2)
+
+            layout.addWidget(QLabel("Low cut (Hz):"), 1, 0)
+            self.low_cut_input = QLineEdit(str(DEFAULT_FILTER_LOW_CUT_HZ))
+            layout.addWidget(self.low_cut_input, 1, 1)
+
+            layout.addWidget(QLabel("High cut (Hz):"), 2, 0)
+            self.high_cut_input = QLineEdit(str(DEFAULT_FILTER_HIGH_CUT_HZ))
+            layout.addWidget(self.high_cut_input, 2, 1)
+
+            apply_button = QPushButton("Apply Filter")
+            apply_button.clicked.connect(self._arm_filter)
+            layout.addWidget(apply_button, 3, 0, 1, 2)
+
+            parent.addWidget(frame, 0, column)
+
+        def _build_rpeak_controls(self, parent: QGridLayout, column: int) -> None:
+            frame = QGroupBox("R-peak Detection")
+            layout = QVBoxLayout(frame)
+
+            self.rpeak_method_selector = QComboBox()
+            self.rpeak_method_selector.addItems(["neurokit", "pantompkins1985", "engzeemod2012", "hamilton2002"])
+            self.rpeak_method_selector.setCurrentText(DEFAULT_RPEAK_METHOD)
+            layout.addWidget(self.rpeak_method_selector)
+
+            parent.addWidget(frame, 0, column)
+
+        def _build_action_controls(self, parent: QGridLayout, column: int) -> None:
+            frame = QGroupBox("Controls")
+            layout = QVBoxLayout(frame)
+
+            start_button = QPushButton("Start")
+            start_button.clicked.connect(self._start_analysis)
+            layout.addWidget(start_button)
+
+            stop_button = QPushButton("Stop")
+            stop_button.clicked.connect(self._stop_analysis)
+            layout.addWidget(stop_button)
+
+            reset_button = QPushButton("Reset")
+            reset_button.clicked.connect(self._reset_ui)
+            layout.addWidget(reset_button)
+
+            pre_report_button = QPushButton("Open Pre-report")
+            pre_report_button.clicked.connect(self._open_pre_report)
+            layout.addWidget(pre_report_button)
+
+            parent.addWidget(frame, 0, column)
+
+        def _build_analysis_tab(self, parent: QVBoxLayout) -> None:
+            self.ecg_plot = pg.PlotWidget(title="Raw ECG + Filtered ECG")
+            self.ecg_plot.setLabel("left", "Amplitude")
+            self.ecg_plot.setLabel("bottom", "Sample")
+            self.ecg_plot.showGrid(x=True, y=True, alpha=0.3)
+            self.ecg_plot.addLegend()
+
+            self.hr_plot = pg.PlotWidget(title="Heart Rate — R-peak tachometer")
+            self.hr_plot.setLabel("left", "BPM")
+            self.hr_plot.setLabel("bottom", "Sample")
+            self.hr_plot.showGrid(x=True, y=True, alpha=0.3)
+            self.hr_plot.addLegend()
+
+            parent.addWidget(self.ecg_plot)
+            parent.addWidget(self.hr_plot)
+
+        def _build_settings_tab(self, parent: QVBoxLayout) -> None:
+            message = (
+                "This tab is reserved for additional acquisition and processing options. "
+                "Current controls are available in the top section for a clean, incremental build."
             )
-            raw_signal = np.asarray(signal, dtype=float).flatten()
-            analysis_signal = raw_signal
+            label = QLabel(message)
+            label.setWordWrap(True)
+            parent.addWidget(label)
 
-            if self.filter_armed:
-                low_cut_hz = float(self.low_cut_var.get())
-                high_cut_hz = float(self.high_cut_var.get())
-                analysis_signal = apply_butterworth_bandpass(
-                    signal=raw_signal,
-                    sampling_rate=DEFAULT_SAMPLING_RATE,
+        def _set_initial_plots(self) -> None:
+            self.ecg_plot.clear()
+            self.hr_plot.clear()
+            self.ecg_plot.setTitle("Raw ECG + Filtered ECG")
+            self.hr_plot.setTitle("Heart Rate — R-peak tachometer")
+
+        def _set_status(self, status: str) -> None:
+            self.status_label.setText(status)
+
+        def _show_error(self, title: str, message: str) -> None:
+            QMessageBox.critical(self, title, message)
+
+        def _show_info(self, title: str, message: str) -> None:
+            QMessageBox.information(self, title, message)
+
+        def _on_source_mode_changed(self) -> None:
+            is_file_mode = self.source_selector.currentText() == "File Replay"
+            self.file_button.setEnabled(is_file_mode)
+
+            if not is_file_mode:
+                self.file_status_label.setText("USB Input selected (placeholder)")
+            elif self.selected_file:
+                self.file_status_label.setText(Path(self.selected_file).name)
+            else:
+                self.file_status_label.setText("No file selected")
+
+        def _select_ecg_file(self) -> None:
+            file_path, _filter = QFileDialog.getOpenFileName(
+                self,
+                "Select ECG data file",
+                "",
+                "ECG files (*.txt *.csv *.npy);;All files (*.*)",
+            )
+            if not file_path:
+                return
+
+            self.selected_file = file_path
+            self.file_status_label.setText(Path(file_path).name)
+            self._set_status(f"Selected file: {file_path}")
+
+        def _arm_filter(self) -> None:
+            try:
+                low_cut_hz = float(self.low_cut_input.text())
+                high_cut_hz = float(self.high_cut_input.text())
+                validate_filter_settings(
                     low_cut_hz=low_cut_hz,
                     high_cut_hz=high_cut_hz,
+                    sampling_rate=DEFAULT_SAMPLING_RATE,
+                )
+            except ValueError as exc:
+                self._show_error("Invalid filter settings", str(exc))
+                self.filter_armed = False
+                return
+
+            self.filter_armed = True
+            self._set_status("Filter settings armed and will be applied on Start")
+
+        def _start_analysis(self) -> None:
+            source_mode = self.source_selector.currentText()
+            if source_mode == "USB Input":
+                self._show_info("USB Input", "USB Input is not implemented yet.")
+                self._set_status("USB Input placeholder selected")
+                return
+
+            if not self.selected_file:
+                self._show_error("Missing ECG file", "Select an ECG data file before starting analysis.")
+                return
+
+            self.acquisition_running = True
+
+            try:
+                signal, source = acquire_ecg_signal(
+                    input_file=self.selected_file,
+                    sampling_rate=DEFAULT_SAMPLING_RATE,
+                    duration_seconds=DEFAULT_SYNTHETIC_DURATION_SECONDS,
+                )
+                raw_signal = np.asarray(signal, dtype=float).flatten()
+                analysis_signal = raw_signal
+
+                if self.filter_armed:
+                    low_cut_hz = float(self.low_cut_input.text())
+                    high_cut_hz = float(self.high_cut_input.text())
+                    analysis_signal = apply_butterworth_bandpass(
+                        signal=raw_signal,
+                        sampling_rate=DEFAULT_SAMPLING_RATE,
+                        low_cut_hz=low_cut_hz,
+                        high_cut_hz=high_cut_hz,
+                    )
+
+                results = analyze_ecg(
+                    signal=analysis_signal,
+                    sampling_rate=DEFAULT_SAMPLING_RATE,
+                    rpeak_method=self.rpeak_method_selector.currentText(),
                 )
 
-            results = analyze_ecg(
-                signal=analysis_signal,
-                sampling_rate=DEFAULT_SAMPLING_RATE,
-                rpeak_method=self.rpeak_method_var.get(),
-            )
+                self.latest_results = results
+                self.latest_source = source
+                self._update_plots(raw_signal=raw_signal, filtered_signal=analysis_signal, results=results)
 
-            self.latest_results = results
-            self.latest_source = source
-            self._update_plots(raw_signal=raw_signal, filtered_signal=analysis_signal, results=results)
+                metrics = results.get("metrics", {})
+                self._set_status(
+                    "Analysis completed: "
+                    f"R peaks={metrics.get('r_peak_count')}, "
+                    f"Mean HR={metrics.get('mean_heart_rate_bpm')} bpm"
+                )
+            except NeuroKit2UnavailableError as exc:
+                self._show_error("Missing dependency", str(exc))
+                self._set_status("Analysis failed: NeuroKit2 is required")
+            except Exception as exc:
+                self._show_error("Analysis error", str(exc))
+                self._set_status(f"Analysis failed: {exc}")
+            finally:
+                self.acquisition_running = False
 
-            metrics = results.get("metrics", {})
-            self.status_var.set(
-                "Analysis completed: "
-                f"R peaks={metrics.get('r_peak_count')}, "
-                f"Mean HR={metrics.get('mean_heart_rate_bpm')} bpm"
-            )
-        except NeuroKit2UnavailableError as exc:
-            messagebox.showerror("Missing dependency", str(exc))
-            self.status_var.set("Analysis failed: NeuroKit2 is required")
-        except Exception as exc:
-            messagebox.showerror("Analysis error", str(exc))
-            self.status_var.set(f"Analysis failed: {exc}")
-        finally:
+        def _stop_analysis(self) -> None:
+            if not self.acquisition_running:
+                self._set_status("Stop requested: no active acquisition loop")
+                return
+
             self.acquisition_running = False
+            self._set_status("Acquisition loop stopped")
 
-    def _stop_analysis(self) -> None:
-        if not self.acquisition_running:
-            self.status_var.set("Stop requested: no active acquisition loop")
-            return
-        self.acquisition_running = False
-        self.status_var.set("Acquisition loop stopped")
+        def _reset_ui(self) -> None:
+            self.acquisition_running = False
+            self.filter_armed = False
+            self.latest_results = None
+            self.latest_source = ""
+            self.selected_file = None
 
-    def _reset_ui(self) -> None:
-        self.acquisition_running = False
-        self.filter_armed = False
-        self.latest_results = None
-        self.latest_source = ""
-        self.selected_file = None
-        self.source_var.set(DEFAULT_INPUT_SOURCE)
-        self.low_cut_var.set(str(DEFAULT_FILTER_LOW_CUT_HZ))
-        self.high_cut_var.set(str(DEFAULT_FILTER_HIGH_CUT_HZ))
-        self.rpeak_method_var.set(DEFAULT_RPEAK_METHOD)
-        self._on_source_mode_changed()
-        self._set_initial_plots()
-        self.status_var.set("State reset")
+            self.source_selector.setCurrentText(DEFAULT_INPUT_SOURCE)
+            self.low_cut_input.setText(str(DEFAULT_FILTER_LOW_CUT_HZ))
+            self.high_cut_input.setText(str(DEFAULT_FILTER_HIGH_CUT_HZ))
+            self.rpeak_method_selector.setCurrentText(DEFAULT_RPEAK_METHOD)
 
-    def _open_pre_report(self) -> None:
-        if not self.latest_results:
-            messagebox.showinfo("Pre-report", "Run Start first to generate a pre-report.")
-            return
+            self._on_source_mode_changed()
+            self._set_initial_plots()
+            self._set_status("State reset")
 
-        report_path = save_pre_report(
-            analysis_results=self.latest_results,
-            output_directory=DEFAULT_OUTPUT_DIR,
-            source=self.latest_source or "unknown",
-        )
-        try:
-            webbrowser.open(report_path.as_uri())
-        except Exception:
-            pass
-        self.status_var.set(f"Pre-report saved to {report_path}")
+        def _open_pre_report(self) -> None:
+            if not self.latest_results:
+                self._show_info("Pre-report", "Run Start first to generate a pre-report.")
+                return
 
-    def _update_plots(self, raw_signal: np.ndarray, filtered_signal: np.ndarray, results: dict[str, Any]) -> None:
-        if not MATPLOTLIB_AVAILABLE or self.axes_ecg is None or self.axes_hr is None:
-            return
+            report_path = save_pre_report(
+                analysis_results=self.latest_results,
+                output_directory=DEFAULT_OUTPUT_DIR,
+                source=self.latest_source or "unknown",
+            )
+            try:
+                webbrowser.open(report_path.as_uri())
+            except Exception:
+                pass
 
-        self.axes_ecg.clear()
-        self.axes_ecg.plot(raw_signal, label="Raw ECG", alpha=0.7)
-        self.axes_ecg.plot(filtered_signal, label="Filtered ECG", alpha=0.8)
-        self.axes_ecg.set_title("Raw ECG + Filtered ECG")
-        self.axes_ecg.set_ylabel("Amplitude")
-        self.axes_ecg.grid(True, alpha=0.3)
-        self.axes_ecg.legend(loc="upper right")
+            self._set_status(f"Pre-report saved to {report_path}")
 
-        hr_trace = np.asarray(results.get("artifacts", {}).get("heart_rate_trace_bpm", []), dtype=float)
-        r_peaks = np.asarray(results.get("artifacts", {}).get("r_peaks", []), dtype=int)
+        def _update_plots(self, raw_signal: np.ndarray, filtered_signal: np.ndarray, results: dict[str, Any]) -> None:
+            self.ecg_plot.clear()
+            self.ecg_plot.addLegend()
+            self.ecg_plot.plot(raw_signal, pen=pg.mkPen("#4C72B0", width=1.2), name="Raw ECG")
+            self.ecg_plot.plot(filtered_signal, pen=pg.mkPen("#55A868", width=1.4), name="Filtered ECG")
+            self.ecg_plot.setTitle("Raw ECG + Filtered ECG")
 
-        self.axes_hr.clear()
-        if hr_trace.size:
-            self.axes_hr.plot(hr_trace, label="Heart Rate (BPM)")
-        if hr_trace.size and r_peaks.size:
-            valid_peaks = r_peaks[r_peaks < hr_trace.size]
-            self.axes_hr.scatter(valid_peaks, hr_trace[valid_peaks], c="red", s=12, label="R peaks")
-        self.axes_hr.set_title("Heart Rate — R-peak tachometer")
-        self.axes_hr.set_xlabel("Sample")
-        self.axes_hr.set_ylabel("BPM")
-        self.axes_hr.grid(True, alpha=0.3)
-        if hr_trace.size:
-            self.axes_hr.legend(loc="upper right")
+            hr_trace = np.asarray(results.get("artifacts", {}).get("heart_rate_trace_bpm", []), dtype=float)
+            r_peaks = np.asarray(results.get("artifacts", {}).get("r_peaks", []), dtype=int)
 
-        self.canvas.draw()
+            self.hr_plot.clear()
+            self.hr_plot.addLegend()
+            if hr_trace.size:
+                self.hr_plot.plot(hr_trace, pen=pg.mkPen("#8172B3", width=1.4), name="Heart Rate (BPM)")
+            if hr_trace.size and r_peaks.size:
+                valid_peaks = r_peaks[r_peaks < hr_trace.size]
+                if valid_peaks.size:
+                    scatter = pg.ScatterPlotItem(
+                        x=valid_peaks,
+                        y=hr_trace[valid_peaks],
+                        pen=None,
+                        brush=pg.mkBrush("#C44E52"),
+                        size=8,
+                        name="R peaks",
+                    )
+                    self.hr_plot.addItem(scatter)
+            self.hr_plot.setTitle("Heart Rate — R-peak tachometer")
 
 
 def launch_ecg_ui() -> int:
     """Launch the desktop ECG UI."""
-    root = tk.Tk()
-    ECGDesktopApp(root)
-    root.mainloop()
-    return 0
+    dependency_error = _get_missing_ui_dependency_message()
+    if dependency_error:
+        raise RuntimeError(dependency_error)
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    window = ECGDesktopApp()
+    window.show()
+    return app.exec()
