@@ -13,7 +13,7 @@ ZIP-download-friendly Python ECG scaffold with a desktop UI flow, modular analys
 3. Install dependencies in your interpreter/terminal:
 
 ```bash
-pip install neurokit2 numpy scipy pandas matplotlib
+pip install neurokit2 numpy scipy pandas PyQt6 pyqtgraph
 ```
 
 4. Launch the desktop app from the project folder:
@@ -56,7 +56,7 @@ Optional flags:
 - `ecg_analysis.py` - NeuroKit2-based ECG processing, filtering helpers, and metric extraction
 - `ecg_report.py` - text/JSON/pre-report generation utilities
 - `ecg_config.py` - centralized defaults and constants
-- `ecg_ui.py` - Tkinter desktop UI and Matplotlib embedding
+- `ecg_ui.py` - PyQt6 desktop UI and pyqtgraph plotting
 - `tests/` - lightweight starter tests
 
 ## Outputs
@@ -72,6 +72,5 @@ This scaffold keeps module boundaries simple and local-file-friendly (`python ec
 
 ## Optional dependency notes
 
-- `tkinter` ships with standard Python installers on most desktop systems and powers the UI.
-- `matplotlib` is required for embedded plotting; if missing, the UI still opens with a clear message instead of crashing.
+- `PyQt6` and `pyqtgraph` power the desktop UI plotting. If either is missing, startup reports a clear install hint instead of crashing.
 - `neurokit2` is required for full ECG analysis and R-peak detection; missing dependency errors are shown clearly in UI/CLI.
