@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-from ecg_config import JSON_REPORT_FILENAME, TEXT_REPORT_FILENAME
+from ecg_config import JSON_REPORT_FILENAME, PRE_REPORT_FILENAME, TEXT_REPORT_FILENAME
 
 
 def build_text_summary(analysis_results: Dict[str, Any], source: str) -> str:
@@ -65,3 +65,12 @@ def save_reports(
         outputs["json_report"] = json_path
 
     return outputs
+
+
+def save_pre_report(analysis_results: Dict[str, Any], output_directory: str, source: str) -> Path:
+    """Write a lightweight text pre-report and return the file path."""
+    output_dir = Path(output_directory).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / PRE_REPORT_FILENAME
+    report_path.write_text(build_text_summary(analysis_results=analysis_results, source=source), encoding="utf-8")
+    return report_path

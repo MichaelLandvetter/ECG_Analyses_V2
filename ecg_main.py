@@ -42,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable JSON output and write only text report.",
     )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Force CLI pipeline mode instead of launching the desktop UI.",
+    )
     return parser
 
 
@@ -73,6 +78,23 @@ def main() -> int:
     """Program entry point."""
     parser = build_parser()
     args = parser.parse_args()
+    should_run_cli = (
+        args.cli
+        or args.input_file is not None
+        or args.sampling_rate != DEFAULT_SAMPLING_RATE
+        or args.duration_seconds != DEFAULT_SYNTHETIC_DURATION_SECONDS
+        or args.output_dir != DEFAULT_OUTPUT_DIR
+        or args.no_json
+    )
+
+    if not should_run_cli:
+        try:
+            from ecg_ui import launch_ecg_ui
+
+            return launch_ecg_ui()
+        except Exception as exc:
+            print(f"UI startup error: {exc}", file=sys.stderr)
+            return 1
 
     try:
         return run(
