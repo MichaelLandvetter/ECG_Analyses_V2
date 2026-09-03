@@ -37,7 +37,6 @@ from ecg_report import save_structured_reports
 
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
-MATPLOTLIB_IMPORT_ERROR: Exception | None = None
 
 try:
     from PyQt6.QtCore import Qt
@@ -74,15 +73,6 @@ except Exception as exc:  # pragma: no cover - env dependent
     PYQTGRAPH_IMPORT_ERROR = exc
     PYQTGRAPH_AVAILABLE = False
 
-try:
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-    from matplotlib.figure import Figure
-
-    MATPLOTLIB_AVAILABLE = True
-except Exception as exc:  # pragma: no cover - env dependent
-    MATPLOTLIB_IMPORT_ERROR = exc
-    MATPLOTLIB_AVAILABLE = False
-
 
 def _get_missing_ui_dependency_message() -> str | None:
     """Return a user-facing message when optional UI dependencies are unavailable."""
@@ -99,33 +89,41 @@ def _get_missing_ui_dependency_message() -> str | None:
         if PYQTGRAPH_IMPORT_ERROR is not None:
             details.append(f"pyqtgraph import error: {PYQTGRAPH_IMPORT_ERROR}")
 
-    if not MATPLOTLIB_AVAILABLE:
-        missing.append("matplotlib")
-        if MATPLOTLIB_IMPORT_ERROR is not None:
-            details.append(f"matplotlib import error: {MATPLOTLIB_IMPORT_ERROR}")
-
     if not missing:
         return None
 
     message = (
         "Desktop UI dependencies are missing: "
         + ", ".join(missing)
-        + ". Install them with `pip install PyQt6 pyqtgraph matplotlib`."
+        + ". Install them with `pip install PyQt6 pyqtgraph`."
     )
     if details:
         message += "\n" + "\n".join(details)
     return message
 
 
-if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
+if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
+
+    class ReviewPlotWidget(pg.PlotWidget):
+        """Plot widget that opens an enlarged view on double-click."""
+
+        def __init__(self, on_double_click: Callable[[], None] | None = None, parent: QWidget | None = None) -> None:
+            super().__init__(parent=parent)
+            self._on_double_click = on_double_click
+
+        def mouseDoubleClickEvent(self, event: Any) -> None:
+            if callable(self._on_double_click):
+                self._on_double_click()
+            event.accept()
+
 
     class ReviewPlotPanel(QWidget):
-        """Reusable plot panel with toolbar and double-click enlarge behavior."""
+        """Reusable pre-report plot panel."""
 
         def __init__(
             self,
             title: str,
-            render_plot: Callable[[Any], None],
+            render_plot: Callable[[pg.PlotWidget], None],
             parent: QWidget | None = None,
         ) -> None:
             super().__init__(parent)
@@ -137,44 +135,27 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
             title_label.setStyleSheet("font-weight: bold;")
             layout.addWidget(title_label)
 
-            self.figure = Figure(figsize=(9, 3.2), tight_layout=True)
-            self.canvas = FigureCanvasQTAgg(self.figure)
-            self.toolbar = NavigationToolbar2QT(self.canvas, self)
-
-            layout.addWidget(self.toolbar)
-            layout.addWidget(self.canvas)
-
-            self.canvas.mpl_connect("button_press_event", self._handle_double_click)
+            self.plot_widget = ReviewPlotWidget(on_double_click=self._open_enlarged_view, parent=self)
+            self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+            self.plot_widget.setMinimumHeight(180)
+            layout.addWidget(self.plot_widget)
             self.refresh()
 
         def refresh(self) -> None:
             """Redraw the plot with the current renderer."""
-            self.figure.clear()
-            axis = self.figure.add_subplot(111)
-            self._render_plot(axis)
-            axis.set_title(self.title)
-            self.figure.tight_layout()
-            self.canvas.draw_idle()
+            self.plot_widget.clear()
+            self._render_plot(self.plot_widget)
 
-        def _handle_double_click(self, event: Any) -> None:
-            if not getattr(event, "dblclick", False):
-                return
+        def _open_enlarged_view(self) -> None:
             dialog = QDialog(self)
             dialog.setWindowTitle(f"{self.title} — enlarged view")
-            dialog.resize(1100, 700)
+            dialog.resize(1400, 760)
 
             layout = QVBoxLayout(dialog)
-            figure = Figure(figsize=(10, 6), tight_layout=True)
-            canvas = FigureCanvasQTAgg(figure)
-            toolbar = NavigationToolbar2QT(canvas, dialog)
-            layout.addWidget(toolbar)
-            layout.addWidget(canvas)
-
-            axis = figure.add_subplot(111)
-            self._render_plot(axis)
-            axis.set_title(self.title)
-            figure.tight_layout()
-            canvas.draw_idle()
+            expanded_plot = pg.PlotWidget()
+            expanded_plot.showGrid(x=True, y=True, alpha=0.25)
+            self._render_plot(expanded_plot)
+            layout.addWidget(expanded_plot)
             dialog.exec()
 
 
@@ -194,7 +175,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
             self.source = source
 
             self.setWindowTitle("ECG Pre-report Review")
-            self.resize(1280, 980)
+            self.setMinimumSize(1080, 700)
+            self._fit_window_to_common_laptop_display()
 
             root_layout = QVBoxLayout(self)
             header = QLabel(f"File analysis complete: {Path(input_file).name}")
@@ -202,7 +184,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
             root_layout.addWidget(header)
 
             root_layout.addWidget(
-                QLabel("Double-click any plot to open an enlarged view. Use the toolbar to pan and zoom.")
+                QLabel("Use mouse wheel to zoom and drag to pan. Double-click any plot to open a larger view.")
             )
 
             self.ecg_panel = ReviewPlotPanel("Full ECG: raw, filtered, and R-peaks", self._plot_ecg_overview, self)
@@ -224,6 +206,16 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
 
             root_layout.addLayout(button_layout)
 
+        def _fit_window_to_common_laptop_display(self) -> None:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is None:
+                self.resize(1500, 820)
+                return
+            available = screen.availableGeometry()
+            target_width = min(1500, max(1080, available.width() - 48))
+            target_height = min(820, max(700, available.height() - 64))
+            self.resize(target_width, target_height)
+
         def _save_reports(self) -> None:
             output_paths = save_structured_reports(
                 analysis_results=self.analysis_results,
@@ -238,53 +230,100 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
                 f"Saved report files to:\n{folder_path}",
             )
 
-        def _plot_ecg_overview(self, axis: Any) -> None:
+        def _plot_ecg_overview(self, plot_widget: pg.PlotWidget) -> None:
             artifacts = self.analysis_results.get("artifacts", {})
             time_axis = np.asarray(artifacts.get("time_seconds", []), dtype=float)
             raw_signal = np.asarray(artifacts.get("raw_signal", []), dtype=float)
             filtered_signal = np.asarray(artifacts.get("filtered_signal", []), dtype=float)
             r_peaks = np.asarray(artifacts.get("r_peaks", []), dtype=int)
 
-            axis.plot(time_axis, raw_signal, label="Raw ECG", linewidth=0.9, color="#4C72B0")
-            axis.plot(time_axis, filtered_signal, label="Filtered ECG", linewidth=1.2, color="#55A868")
+            plot_widget.setLabel("bottom", "Time (s)")
+            plot_widget.setLabel("left", "Amplitude")
+            plot_widget.setTitle(self.ecg_panel.title if hasattr(self, "ecg_panel") else "Full ECG")
+            plot_widget.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0), name="Raw ECG")
+            plot_widget.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2), name="Filtered ECG")
             valid_r_peaks = r_peaks[(r_peaks >= 0) & (r_peaks < filtered_signal.size)]
             if valid_r_peaks.size:
-                axis.scatter(
+                plot_widget.plot(
                     time_axis[valid_r_peaks],
                     filtered_signal[valid_r_peaks],
-                    label="R-peaks",
-                    s=12,
-                    color="#C44E52",
+                    pen=None,
+                    symbol="o",
+                    symbolSize=6,
+                    symbolBrush=pg.mkBrush("#C44E52"),
+                    symbolPen=None,
                 )
-            axis.set_xlabel("Time (s)")
-            axis.set_ylabel("Amplitude")
-            axis.grid(True, alpha=0.3)
-            axis.legend(loc="upper right")
 
-        def _plot_heart_rate(self, axis: Any) -> None:
+        def _plot_heart_rate(self, plot_widget: pg.PlotWidget) -> None:
             artifacts = self.analysis_results.get("artifacts", {})
             time_axis = np.asarray(artifacts.get("time_seconds", []), dtype=float)
             heart_rate = np.asarray(artifacts.get("heart_rate_trace_bpm", []), dtype=float)
 
-            axis.plot(time_axis, heart_rate, linewidth=1.2, color="#8172B3")
-            axis.set_xlabel("Time (s)")
-            axis.set_ylabel("Heart rate (BPM)")
-            axis.grid(True, alpha=0.3)
+            plot_widget.setLabel("bottom", "Time (s)")
+            plot_widget.setLabel("left", "Heart rate (BPM)")
+            plot_widget.setTitle(self.hr_panel.title if hasattr(self, "hr_panel") else "Heart rate")
+            plot_widget.plot(time_axis, heart_rate, pen=pg.mkPen("#8172B3", width=1.2))
 
-        def _plot_beats(self, axis: Any) -> None:
+        def _plot_beats(self, plot_widget: pg.PlotWidget) -> None:
             artifacts = self.analysis_results.get("artifacts", {})
             beat_time = np.asarray(artifacts.get("beat_time_offsets_seconds", []), dtype=float)
             beat_snippets = np.asarray(artifacts.get("beat_snippets", []), dtype=float)
             average_template = np.asarray(artifacts.get("average_template", []), dtype=float)
+            beat_landmarks = self.analysis_results.get("report_tables", {}).get("beat_morphology_landmarks", [])
 
             if beat_snippets.ndim == 2 and beat_snippets.size:
                 for beat in beat_snippets:
-                    axis.plot(beat_time, beat, color="#B0B0B0", alpha=0.45, linewidth=0.8)
-            axis.plot(beat_time, average_template, color="#C44E52", linewidth=2.0, label="Average template")
-            axis.set_xlabel("Time from R-peak (s)")
-            axis.set_ylabel("Amplitude")
-            axis.grid(True, alpha=0.3)
-            axis.legend(loc="upper right")
+                    plot_widget.plot(beat_time, beat, pen=pg.mkPen("#B0B0B0", width=0.8))
+            plot_widget.plot(beat_time, average_template, pen=pg.mkPen("#C44E52", width=2.0))
+            plot_widget.setLabel("bottom", "Time from R-peak (s)")
+            plot_widget.setLabel("left", "Amplitude")
+            plot_widget.setTitle(self.beat_panel.title if hasattr(self, "beat_panel") else "Beat snippets")
+
+            finite_template = np.isfinite(average_template)
+            sampling_rate_hz = float(self.analysis_results.get("metrics", {}).get("sampling_rate_hz", 0) or 0)
+            marker_specs = (
+                ("p_peak_sample", "P", "#1F77B4", "t"),
+                ("q_peak_sample", "Q", "#2CA02C", "d"),
+                ("s_peak_sample", "S", "#FF7F0E", "s"),
+                ("t_peak_sample", "T", "#9467BD", "o"),
+            )
+            for sample_field, label, color, symbol in marker_specs:
+                relative_positions: list[float] = []
+                for row in beat_landmarks:
+                    sample_value = row.get(sample_field)
+                    r_peak_sample = row.get("r_peak_sample")
+                    if sample_value is None or r_peak_sample is None:
+                        continue
+                    try:
+                        sample_float = float(sample_value)
+                        r_peak_float = float(r_peak_sample)
+                    except (TypeError, ValueError):
+                        continue
+                    if not np.isfinite(sample_float) or not np.isfinite(r_peak_float):
+                        continue
+                    if sampling_rate_hz <= 0:
+                        continue
+                    relative_positions.append((sample_float - r_peak_float) / sampling_rate_hz)
+                finite_wave = np.isfinite(beat_time) & finite_template
+                if not relative_positions or not finite_wave.any():
+                    continue
+
+                marker_x = float(np.nanmedian(np.asarray(relative_positions, dtype=float)))
+                marker_x = float(np.clip(marker_x, np.nanmin(beat_time[finite_wave]), np.nanmax(beat_time[finite_wave])))
+                marker_y = float(np.interp(marker_x, beat_time[finite_wave], average_template[finite_wave]))
+
+                plot_widget.plot(
+                    [marker_x],
+                    [marker_y],
+                    pen=None,
+                    symbol=symbol,
+                    symbolSize=11,
+                    symbolBrush=pg.mkBrush(color),
+                    symbolPen=pg.mkPen(color),
+                )
+                label_item = pg.TextItem(text=label, color=color, anchor=(0.5, 1.4))
+                label_item.setPos(marker_x, marker_y)
+                plot_widget.addItem(label_item)
 
 
     class ECGDesktopApp(QMainWindow):

@@ -11,7 +11,7 @@ Clean, ZIP-download-friendly Python ECG analysis app focused on **offline data-f
 Install the project dependencies in Thonny, PyCharm, or a terminal:
 
 ```bash
-pip install neurokit2 numpy scipy pandas matplotlib PyQt6 pyqtgraph
+pip install neurokit2 numpy scipy pandas PyQt6 pyqtgraph
 ```
 
 ## Run the app
@@ -41,8 +41,8 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 7. When processing finishes, a **pre-report review window** opens with:
    - full ECG raw + filtered + R-peaks
    - full-duration heart-rate plot
-   - beat snippets with average template overlay
-8. Double-click any review plot to open an enlarged navigable view. Matplotlib toolbars support pan/zoom.
+   - beat snippets with average template overlay plus P/Q/S/T markers from NeuroKit2 delineation
+8. Use PyQtGraph pan/zoom in each review plot, and double-click any plot to open an enlarged navigable view.
 9. Click **Save Reports** to export CSV report files, or **Back to Analysis** to return without exporting.
 
 ## ECG Processing Settings tab
