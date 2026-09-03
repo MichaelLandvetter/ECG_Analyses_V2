@@ -27,3 +27,5 @@ htmlcov/
 
 # Local outputs
 output/
+Reports/
+ecg_settings.json

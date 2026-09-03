@@ -28,7 +28,12 @@ class TestECGScaffold(unittest.TestCase):
 
         self.assertIn("metrics", result)
         self.assertIn("artifacts", result)
+        self.assertIn("report_tables", result)
         self.assertIn("mean_heart_rate_bpm", result["metrics"])
+        self.assertIn("summary_metrics", result["report_tables"])
+        self.assertIn("continuous_time_series", result["report_tables"])
+        self.assertIn("raw_signal", result["artifacts"])
+        self.assertIn("filtered_signal", result["artifacts"])
 
     def test_validate_filter_settings_rejects_invalid_high_cut(self) -> None:
         with self.assertRaises(ValueError):
