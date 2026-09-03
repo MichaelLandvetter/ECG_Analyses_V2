@@ -33,7 +33,7 @@ def _ensure_neurokit2():
     except ImportError as exc:
         raise NeuroKit2UnavailableError(
             "NeuroKit2 is required for ECG analysis. Install dependencies with: "
-            "pip install neurokit2 numpy scipy pandas matplotlib"
+            "pip install neurokit2 numpy scipy pandas"
         ) from exc
     return nk
 
@@ -115,7 +115,7 @@ def apply_butterworth_bandpass(
     except Exception as exc:
         raise RuntimeError(
             "SciPy is required for Butterworth filtering. Install dependencies with: "
-            "pip install neurokit2 numpy scipy pandas matplotlib"
+            "pip install neurokit2 numpy scipy pandas"
         ) from exc
 
     validate_filter_settings(low_cut_hz=low_cut_hz, high_cut_hz=high_cut_hz, sampling_rate=sampling_rate)
@@ -140,7 +140,7 @@ def apply_powerline_notch(
     except Exception as exc:
         raise RuntimeError(
             "SciPy is required for power-line notch filtering. Install dependencies with: "
-            "pip install neurokit2 numpy scipy pandas matplotlib"
+            "pip install neurokit2 numpy scipy pandas"
         ) from exc
 
     validate_powerline_frequency(notch_frequency_hz=notch_frequency_hz, sampling_rate=sampling_rate)
