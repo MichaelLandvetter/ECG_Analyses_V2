@@ -41,9 +41,9 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 7. When processing finishes, a **pre-report review window** opens with:
    - full ECG raw + filtered + R-peaks
    - full-duration heart-rate plot
-   - beat snippets with average template overlay plus P/Q/S/T markers from NeuroKit2 delineation
+   - beat snippets with average template overlay plus per-beat P/Q/S/T markers from NeuroKit2 delineation
 8. Use PyQtGraph pan/zoom in each review plot, and double-click any plot to open an enlarged navigable view.
-9. Click **Save Reports** to export CSV report files, or **Back to Analysis** to return without exporting.
+9. Click **Save Reports** to export CSV report files; after confirming the success dialog, the pre-report window closes and focus returns to the main analysis window. Use **Back to Analysis** to return without exporting.
 
 ## ECG Processing Settings tab
 
