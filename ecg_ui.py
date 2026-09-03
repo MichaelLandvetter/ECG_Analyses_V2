@@ -1,41 +1,52 @@
-"""PyQt6 desktop UI for ECG acquisition and analysis flow."""
+"""PyQt6 desktop UI for offline ECG file analysis and report review."""
 
 from __future__ import annotations
 
 import sys
-import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from ecg_acquisition import acquire_ecg_signal
 from ecg_analysis import (
     NeuroKit2UnavailableError,
+    SUPPORTED_FILTER_MODES,
+    SUPPORTED_RPEAK_METHODS,
     analyze_ecg,
-    apply_butterworth_bandpass,
+    clean_ecg_signal,
+    validate_filter_mode,
     validate_filter_settings,
+    validate_powerline_frequency,
 )
 from ecg_config import (
     DEFAULT_FILTER_HIGH_CUT_HZ,
     DEFAULT_FILTER_LOW_CUT_HZ,
     DEFAULT_FILTER_MODE,
     DEFAULT_INPUT_SOURCE,
-    DEFAULT_OUTPUT_DIR,
+    DEFAULT_POWERLINE_FREQUENCY_HZ,
+    DEFAULT_ROLLING_WINDOW_SECONDS,
     DEFAULT_RPEAK_METHOD,
     DEFAULT_SAMPLING_RATE,
     DEFAULT_SYNTHETIC_DURATION_SECONDS,
+    DEFAULT_USB_PLACEHOLDER_TEXT,
+    load_processing_settings,
+    save_processing_settings,
 )
-from ecg_report import save_pre_report
+from ecg_report import save_structured_reports
 
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
+MATPLOTLIB_IMPORT_ERROR: Exception | None = None
 
 try:
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import (
         QApplication,
         QComboBox,
+        QDialog,
         QFileDialog,
+        QFormLayout,
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
@@ -44,6 +55,7 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QProgressDialog,
         QTabWidget,
         QVBoxLayout,
         QWidget,
@@ -62,6 +74,15 @@ except Exception as exc:  # pragma: no cover - env dependent
     PYQTGRAPH_IMPORT_ERROR = exc
     PYQTGRAPH_AVAILABLE = False
 
+try:
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+    from matplotlib.figure import Figure
+
+    MATPLOTLIB_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - env dependent
+    MATPLOTLIB_IMPORT_ERROR = exc
+    MATPLOTLIB_AVAILABLE = False
+
 
 def _get_missing_ui_dependency_message() -> str | None:
     """Return a user-facing message when optional UI dependencies are unavailable."""
@@ -78,42 +99,218 @@ def _get_missing_ui_dependency_message() -> str | None:
         if PYQTGRAPH_IMPORT_ERROR is not None:
             details.append(f"pyqtgraph import error: {PYQTGRAPH_IMPORT_ERROR}")
 
+    if not MATPLOTLIB_AVAILABLE:
+        missing.append("matplotlib")
+        if MATPLOTLIB_IMPORT_ERROR is not None:
+            details.append(f"matplotlib import error: {MATPLOTLIB_IMPORT_ERROR}")
+
     if not missing:
         return None
 
     message = (
         "Desktop UI dependencies are missing: "
         + ", ".join(missing)
-        + ". Install them with `pip install PyQt6 pyqtgraph`."
+        + ". Install them with `pip install PyQt6 pyqtgraph matplotlib`."
     )
     if details:
         message += "\n" + "\n".join(details)
     return message
 
 
-if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
+if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE and MATPLOTLIB_AVAILABLE:
+
+    class ReviewPlotPanel(QWidget):
+        """Reusable plot panel with toolbar and double-click enlarge behavior."""
+
+        def __init__(
+            self,
+            title: str,
+            render_plot: Callable[[Any], None],
+            parent: QWidget | None = None,
+        ) -> None:
+            super().__init__(parent)
+            self.title = title
+            self._render_plot = render_plot
+
+            layout = QVBoxLayout(self)
+            title_label = QLabel(title)
+            title_label.setStyleSheet("font-weight: bold;")
+            layout.addWidget(title_label)
+
+            self.figure = Figure(figsize=(9, 3.2), tight_layout=True)
+            self.canvas = FigureCanvasQTAgg(self.figure)
+            self.toolbar = NavigationToolbar2QT(self.canvas, self)
+
+            layout.addWidget(self.toolbar)
+            layout.addWidget(self.canvas)
+
+            self.canvas.mpl_connect("button_press_event", self._handle_double_click)
+            self.refresh()
+
+        def refresh(self) -> None:
+            """Redraw the plot with the current renderer."""
+            self.figure.clear()
+            axis = self.figure.add_subplot(111)
+            self._render_plot(axis)
+            axis.set_title(self.title)
+            self.figure.tight_layout()
+            self.canvas.draw_idle()
+
+        def _handle_double_click(self, event: Any) -> None:
+            if not getattr(event, "dblclick", False):
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"{self.title} — enlarged view")
+            dialog.resize(1100, 700)
+
+            layout = QVBoxLayout(dialog)
+            figure = Figure(figsize=(10, 6), tight_layout=True)
+            canvas = FigureCanvasQTAgg(figure)
+            toolbar = NavigationToolbar2QT(canvas, dialog)
+            layout.addWidget(toolbar)
+            layout.addWidget(canvas)
+
+            axis = figure.add_subplot(111)
+            self._render_plot(axis)
+            axis.set_title(self.title)
+            figure.tight_layout()
+            canvas.draw_idle()
+            dialog.exec()
+
+
+    class PreReportReviewDialog(QDialog):
+        """Review window shown after offline analysis completes."""
+
+        def __init__(
+            self,
+            analysis_results: dict[str, Any],
+            input_file: str,
+            source: str,
+            parent: QWidget | None = None,
+        ) -> None:
+            super().__init__(parent)
+            self.analysis_results = analysis_results
+            self.input_file = input_file
+            self.source = source
+
+            self.setWindowTitle("ECG Pre-report Review")
+            self.resize(1280, 980)
+
+            root_layout = QVBoxLayout(self)
+            header = QLabel(f"File analysis complete: {Path(input_file).name}")
+            header.setStyleSheet("font-size: 16px; font-weight: bold;")
+            root_layout.addWidget(header)
+
+            root_layout.addWidget(
+                QLabel("Double-click any plot to open an enlarged view. Use the toolbar to pan and zoom.")
+            )
+
+            self.ecg_panel = ReviewPlotPanel("Full ECG: raw, filtered, and R-peaks", self._plot_ecg_overview, self)
+            self.hr_panel = ReviewPlotPanel("Heart-rate over full duration", self._plot_heart_rate, self)
+            self.beat_panel = ReviewPlotPanel("Beat snippets with average template overlay", self._plot_beats, self)
+
+            root_layout.addWidget(self.ecg_panel)
+            root_layout.addWidget(self.hr_panel)
+            root_layout.addWidget(self.beat_panel)
+
+            button_layout = QHBoxLayout()
+            back_button = QPushButton("Back to Analysis")
+            back_button.clicked.connect(self.close)
+            button_layout.addWidget(back_button)
+
+            save_button = QPushButton("Save Reports")
+            save_button.clicked.connect(self._save_reports)
+            button_layout.addWidget(save_button)
+
+            root_layout.addLayout(button_layout)
+
+        def _save_reports(self) -> None:
+            output_paths = save_structured_reports(
+                analysis_results=self.analysis_results,
+                input_file=self.input_file,
+                source=self.source,
+                write_json=False,
+            )
+            folder_path = output_paths["summary_metrics_csv"].parent
+            QMessageBox.information(
+                self,
+                "Reports saved",
+                f"Saved report files to:\n{folder_path}",
+            )
+
+        def _plot_ecg_overview(self, axis: Any) -> None:
+            artifacts = self.analysis_results.get("artifacts", {})
+            time_axis = np.asarray(artifacts.get("time_seconds", []), dtype=float)
+            raw_signal = np.asarray(artifacts.get("raw_signal", []), dtype=float)
+            filtered_signal = np.asarray(artifacts.get("filtered_signal", []), dtype=float)
+            r_peaks = np.asarray(artifacts.get("r_peaks", []), dtype=int)
+
+            axis.plot(time_axis, raw_signal, label="Raw ECG", linewidth=0.9, color="#4C72B0")
+            axis.plot(time_axis, filtered_signal, label="Filtered ECG", linewidth=1.2, color="#55A868")
+            valid_r_peaks = r_peaks[(r_peaks >= 0) & (r_peaks < filtered_signal.size)]
+            if valid_r_peaks.size:
+                axis.scatter(
+                    time_axis[valid_r_peaks],
+                    filtered_signal[valid_r_peaks],
+                    label="R-peaks",
+                    s=12,
+                    color="#C44E52",
+                )
+            axis.set_xlabel("Time (s)")
+            axis.set_ylabel("Amplitude")
+            axis.grid(True, alpha=0.3)
+            axis.legend(loc="upper right")
+
+        def _plot_heart_rate(self, axis: Any) -> None:
+            artifacts = self.analysis_results.get("artifacts", {})
+            time_axis = np.asarray(artifacts.get("time_seconds", []), dtype=float)
+            heart_rate = np.asarray(artifacts.get("heart_rate_trace_bpm", []), dtype=float)
+
+            axis.plot(time_axis, heart_rate, linewidth=1.2, color="#8172B3")
+            axis.set_xlabel("Time (s)")
+            axis.set_ylabel("Heart rate (BPM)")
+            axis.grid(True, alpha=0.3)
+
+        def _plot_beats(self, axis: Any) -> None:
+            artifacts = self.analysis_results.get("artifacts", {})
+            beat_time = np.asarray(artifacts.get("beat_time_offsets_seconds", []), dtype=float)
+            beat_snippets = np.asarray(artifacts.get("beat_snippets", []), dtype=float)
+            average_template = np.asarray(artifacts.get("average_template", []), dtype=float)
+
+            if beat_snippets.ndim == 2 and beat_snippets.size:
+                for beat in beat_snippets:
+                    axis.plot(beat_time, beat, color="#B0B0B0", alpha=0.45, linewidth=0.8)
+            axis.plot(beat_time, average_template, color="#C44E52", linewidth=2.0, label="Average template")
+            axis.set_xlabel("Time from R-peak (s)")
+            axis.set_ylabel("Amplitude")
+            axis.grid(True, alpha=0.3)
+            axis.legend(loc="upper right")
+
 
     class ECGDesktopApp(QMainWindow):
-        """Desktop UI for running the clean ECG analysis skeleton."""
+        """Desktop UI for clean offline ECG file analysis."""
 
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("ECG Analysis")
-            self.resize(1300, 820)
+            self.resize(1320, 900)
 
             self.selected_file: str | None = None
             self.acquisition_running = False
-            self.filter_armed = False
             self.latest_results: dict[str, Any] | None = None
             self.latest_source = ""
+            self.latest_raw_signal: np.ndarray | None = None
+            self.processing_settings = load_processing_settings()
 
             central_widget = QWidget(self)
             self.setCentralWidget(central_widget)
             self.root_layout = QVBoxLayout(central_widget)
 
             self._build_layout()
+            self._apply_processing_settings(self.processing_settings)
             self._set_initial_plots()
             self._on_source_mode_changed()
+            self._set_status("Ready for offline ECG file analysis")
 
         def _build_layout(self) -> None:
             controls_container = QWidget()
@@ -150,7 +347,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             self.source_selector = QComboBox()
             self.source_selector.addItems(["File Replay", "USB Input"])
-            self.source_selector.setCurrentText(DEFAULT_INPUT_SOURCE)
             self.source_selector.currentTextChanged.connect(self._on_source_mode_changed)
             layout.addWidget(self.source_selector)
 
@@ -175,8 +371,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             layout = QGridLayout(frame)
 
             self.filter_mode_selector = QComboBox()
-            self.filter_mode_selector.addItems(["Butterworth bandpass"])
-            self.filter_mode_selector.setCurrentText(DEFAULT_FILTER_MODE)
+            self.filter_mode_selector.addItems(list(SUPPORTED_FILTER_MODES))
+            self.filter_mode_selector.currentTextChanged.connect(self._on_filter_mode_changed)
             layout.addWidget(self.filter_mode_selector, 0, 0, 1, 2)
 
             layout.addWidget(QLabel("Low cut (Hz):"), 1, 0)
@@ -188,7 +384,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             layout.addWidget(self.high_cut_input, 2, 1)
 
             apply_button = QPushButton("Apply Filter")
-            apply_button.clicked.connect(self._arm_filter)
+            apply_button.clicked.connect(self._apply_filter_preview)
             layout.addWidget(apply_button, 3, 0, 1, 2)
 
             parent.addWidget(frame, 0, column)
@@ -198,8 +394,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             layout = QVBoxLayout(frame)
 
             self.rpeak_method_selector = QComboBox()
-            self.rpeak_method_selector.addItems(["neurokit", "pantompkins1985", "engzeemod2012", "hamilton2002"])
-            self.rpeak_method_selector.setCurrentText(DEFAULT_RPEAK_METHOD)
+            self.rpeak_method_selector.addItems(list(SUPPORTED_RPEAK_METHODS))
+            self.rpeak_method_selector.currentTextChanged.connect(self._sync_settings_rpeak_selector)
             layout.addWidget(self.rpeak_method_selector)
 
             parent.addWidget(frame, 0, column)
@@ -229,33 +425,74 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
         def _build_analysis_tab(self, parent: QVBoxLayout) -> None:
             self.ecg_plot = pg.PlotWidget(title="Raw ECG + Filtered ECG")
             self.ecg_plot.setLabel("left", "Amplitude")
-            self.ecg_plot.setLabel("bottom", "Sample")
+            self.ecg_plot.setLabel("bottom", "Time (s)")
             self.ecg_plot.showGrid(x=True, y=True, alpha=0.3)
-            self.ecg_plot.addLegend()
 
-            self.hr_plot = pg.PlotWidget(title="Heart Rate — R-peak tachometer")
+            self.hr_plot = pg.PlotWidget(title="Heart Rate over full duration")
             self.hr_plot.setLabel("left", "BPM")
-            self.hr_plot.setLabel("bottom", "Sample")
+            self.hr_plot.setLabel("bottom", "Time (s)")
             self.hr_plot.showGrid(x=True, y=True, alpha=0.3)
-            self.hr_plot.addLegend()
 
             parent.addWidget(self.ecg_plot)
             parent.addWidget(self.hr_plot)
 
         def _build_settings_tab(self, parent: QVBoxLayout) -> None:
-            message = (
-                "This tab is reserved for additional acquisition and processing options. "
-                "Current controls are available in the top section for a clean, incremental build."
+            detector_group = QGroupBox("R-peak detector method")
+            detector_layout = QFormLayout(detector_group)
+            self.settings_rpeak_method_selector = QComboBox()
+            self.settings_rpeak_method_selector.addItems(list(SUPPORTED_RPEAK_METHODS))
+            self.settings_rpeak_method_selector.currentTextChanged.connect(self._sync_top_rpeak_selector)
+            detector_layout.addRow("Method:", self.settings_rpeak_method_selector)
+            parent.addWidget(detector_group)
+
+            offline_group = QGroupBox("Offline processing")
+            offline_layout = QFormLayout(offline_group)
+            self.sampling_rate_input = QLineEdit(str(DEFAULT_SAMPLING_RATE))
+            self.powerline_input = QLineEdit(str(DEFAULT_POWERLINE_FREQUENCY_HZ))
+            offline_layout.addRow("Sampling rate (Hz):", self.sampling_rate_input)
+            offline_layout.addRow("Power-line notch (Hz):", self.powerline_input)
+            parent.addWidget(offline_group)
+
+            rolling_window_group = QGroupBox("Rolling window (USB only)")
+            rolling_window_layout = QFormLayout(rolling_window_group)
+            self.rolling_window_input = QLineEdit(str(DEFAULT_ROLLING_WINDOW_SECONDS))
+            rolling_window_layout.addRow("Window length (s):", self.rolling_window_input)
+            rolling_window_layout.addRow(
+                QLabel("Stored for future USB streaming support. Not used for offline file replay."),
             )
-            label = QLabel(message)
-            label.setWordWrap(True)
-            parent.addWidget(label)
+            parent.addWidget(rolling_window_group)
+
+            deferred_note = QLabel(
+                "Deferred features note: USB streaming controls and additional acquisition tuning remain placeholders in "
+                "this clean milestone. Offline file replay uses the saved filter, R-peak, sampling-rate, and notch settings."
+            )
+            deferred_note.setWordWrap(True)
+            parent.addWidget(deferred_note)
+
+            save_button = QPushButton("Save ECG Processing Settings")
+            save_button.clicked.connect(self._save_current_processing_settings)
+            parent.addWidget(save_button)
+            parent.addStretch(1)
+
+        def _apply_processing_settings(self, settings: dict[str, Any]) -> None:
+            self.source_selector.setCurrentText(str(settings.get("input_source", DEFAULT_INPUT_SOURCE)))
+            self.filter_mode_selector.setCurrentText(str(settings.get("filter_mode", DEFAULT_FILTER_MODE)))
+            self.low_cut_input.setText(str(settings.get("filter_low_cut_hz", DEFAULT_FILTER_LOW_CUT_HZ)))
+            self.high_cut_input.setText(str(settings.get("filter_high_cut_hz", DEFAULT_FILTER_HIGH_CUT_HZ)))
+            self.rpeak_method_selector.setCurrentText(str(settings.get("rpeak_method", DEFAULT_RPEAK_METHOD)))
+            self.settings_rpeak_method_selector.setCurrentText(str(settings.get("rpeak_method", DEFAULT_RPEAK_METHOD)))
+            self.sampling_rate_input.setText(str(settings.get("sampling_rate_hz", DEFAULT_SAMPLING_RATE)))
+            self.powerline_input.setText(str(settings.get("powerline_frequency_hz", DEFAULT_POWERLINE_FREQUENCY_HZ)))
+            self.rolling_window_input.setText(
+                str(settings.get("rolling_window_seconds", DEFAULT_ROLLING_WINDOW_SECONDS))
+            )
+            self._on_filter_mode_changed()
 
         def _set_initial_plots(self) -> None:
             self.ecg_plot.clear()
             self.hr_plot.clear()
-            self.ecg_plot.setTitle("Raw ECG + Filtered ECG")
-            self.hr_plot.setTitle("Heart Rate — R-peak tachometer")
+            self.ecg_plot.setTitle("Raw ECG + Filtered ECG preview")
+            self.hr_plot.setTitle("Heart Rate over full duration")
 
         def _set_status(self, status: str) -> None:
             self.status_label.setText(status)
@@ -266,12 +503,32 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
         def _show_info(self, title: str, message: str) -> None:
             QMessageBox.information(self, title, message)
 
+        def _sync_settings_rpeak_selector(self, method: str) -> None:
+            if self.settings_rpeak_method_selector.currentText() == method:
+                return
+            self.settings_rpeak_method_selector.blockSignals(True)
+            self.settings_rpeak_method_selector.setCurrentText(method)
+            self.settings_rpeak_method_selector.blockSignals(False)
+
+        def _sync_top_rpeak_selector(self, method: str) -> None:
+            if self.rpeak_method_selector.currentText() == method:
+                return
+            self.rpeak_method_selector.blockSignals(True)
+            self.rpeak_method_selector.setCurrentText(method)
+            self.rpeak_method_selector.blockSignals(False)
+
+        def _on_filter_mode_changed(self) -> None:
+            is_butterworth = self.filter_mode_selector.currentText() == "Butterworth bandpass"
+            self.low_cut_input.setEnabled(is_butterworth)
+            self.high_cut_input.setEnabled(is_butterworth)
+
         def _on_source_mode_changed(self) -> None:
             is_file_mode = self.source_selector.currentText() == "File Replay"
             self.file_button.setEnabled(is_file_mode)
 
             if not is_file_mode:
-                self.file_status_label.setText("USB Input selected (placeholder)")
+                self.file_status_label.setText(DEFAULT_USB_PLACEHOLDER_TEXT)
+                self._set_status(DEFAULT_USB_PLACEHOLDER_TEXT)
             elif self.selected_file:
                 self.file_status_label.setText(Path(self.selected_file).name)
             else:
@@ -291,148 +548,226 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.file_status_label.setText(Path(file_path).name)
             self._set_status(f"Selected file: {file_path}")
 
-        def _arm_filter(self) -> None:
-            try:
-                low_cut_hz = float(self.low_cut_input.text())
-                high_cut_hz = float(self.high_cut_input.text())
+        def _get_current_processing_settings(self) -> dict[str, Any]:
+            sampling_rate = int(self.sampling_rate_input.text())
+            filter_mode = validate_filter_mode(self.filter_mode_selector.currentText())
+            low_cut_hz = float(self.low_cut_input.text())
+            high_cut_hz = float(self.high_cut_input.text())
+            powerline_frequency_hz = float(self.powerline_input.text())
+            rolling_window_seconds = int(self.rolling_window_input.text())
+            rpeak_method = self.rpeak_method_selector.currentText().strip().lower()
+
+            if sampling_rate <= 0:
+                raise ValueError("Sampling rate must be greater than 0.")
+            validate_powerline_frequency(powerline_frequency_hz, sampling_rate=sampling_rate)
+            if filter_mode == "Butterworth bandpass":
                 validate_filter_settings(
                     low_cut_hz=low_cut_hz,
                     high_cut_hz=high_cut_hz,
-                    sampling_rate=DEFAULT_SAMPLING_RATE,
+                    sampling_rate=sampling_rate,
                 )
+            if rolling_window_seconds <= 0:
+                raise ValueError("Rolling window must be greater than 0 seconds.")
+
+            return {
+                "input_source": self.source_selector.currentText(),
+                "sampling_rate_hz": sampling_rate,
+                "filter_mode": filter_mode,
+                "filter_low_cut_hz": low_cut_hz,
+                "filter_high_cut_hz": high_cut_hz,
+                "rpeak_method": rpeak_method,
+                "powerline_frequency_hz": powerline_frequency_hz,
+                "rolling_window_seconds": rolling_window_seconds,
+            }
+
+        def _load_selected_signal(self, sampling_rate: int) -> tuple[np.ndarray, str]:
+            signal, source = acquire_ecg_signal(
+                input_file=self.selected_file,
+                sampling_rate=sampling_rate,
+                duration_seconds=DEFAULT_SYNTHETIC_DURATION_SECONDS,
+            )
+            return np.asarray(signal, dtype=float).flatten(), source
+
+        def _apply_filter_preview(self) -> None:
+            try:
+                settings = self._get_current_processing_settings()
             except ValueError as exc:
-                self._show_error("Invalid filter settings", str(exc))
-                self.filter_armed = False
+                self._show_error("Invalid processing settings", str(exc))
                 return
 
-            self.filter_armed = True
-            self._set_status("Filter settings armed and will be applied on Start")
+            if not self.selected_file:
+                self.processing_settings = settings
+                self._set_status("Filter settings saved in the current session. Select a file to preview them.")
+                return
+
+            try:
+                raw_signal, _source = self._load_selected_signal(settings["sampling_rate_hz"])
+                filtered_signal = clean_ecg_signal(
+                    signal=raw_signal,
+                    sampling_rate=settings["sampling_rate_hz"],
+                    filter_mode=settings["filter_mode"],
+                    low_cut_hz=settings["filter_low_cut_hz"],
+                    high_cut_hz=settings["filter_high_cut_hz"],
+                    powerline_frequency_hz=settings["powerline_frequency_hz"],
+                )
+            except (FileNotFoundError, NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
+                self._show_error("Filter preview error", str(exc))
+                return
+
+            self.processing_settings = settings
+            self.latest_raw_signal = raw_signal
+            self._update_preview_plots(raw_signal=raw_signal, filtered_signal=filtered_signal, results=None, sampling_rate=settings["sampling_rate_hz"])
+            self._set_status(f"Preview updated with {settings['filter_mode']}")
 
         def _start_analysis(self) -> None:
-            source_mode = self.source_selector.currentText()
-            if source_mode == "USB Input":
-                self._show_info("USB Input", "USB Input is not implemented yet.")
-                self._set_status("USB Input placeholder selected")
+            if self.source_selector.currentText() == "USB Input":
+                self._show_info("USB Input", DEFAULT_USB_PLACEHOLDER_TEXT)
+                self._set_status(DEFAULT_USB_PLACEHOLDER_TEXT)
                 return
 
             if not self.selected_file:
                 self._show_error("Missing ECG file", "Select an ECG data file before starting analysis.")
                 return
 
-            self.acquisition_running = True
-
             try:
-                signal, source = acquire_ecg_signal(
-                    input_file=self.selected_file,
-                    sampling_rate=DEFAULT_SAMPLING_RATE,
-                    duration_seconds=DEFAULT_SYNTHETIC_DURATION_SECONDS,
-                )
-                raw_signal = np.asarray(signal, dtype=float).flatten()
-                analysis_signal = raw_signal
-
-                if self.filter_armed:
-                    low_cut_hz = float(self.low_cut_input.text())
-                    high_cut_hz = float(self.high_cut_input.text())
-                    analysis_signal = apply_butterworth_bandpass(
-                        signal=raw_signal,
-                        sampling_rate=DEFAULT_SAMPLING_RATE,
-                        low_cut_hz=low_cut_hz,
-                        high_cut_hz=high_cut_hz,
-                    )
-
-                results = analyze_ecg(
-                    signal=analysis_signal,
-                    sampling_rate=DEFAULT_SAMPLING_RATE,
-                    rpeak_method=self.rpeak_method_selector.currentText(),
-                )
-
-                self.latest_results = results
-                self.latest_source = source
-                self._update_plots(raw_signal=raw_signal, filtered_signal=analysis_signal, results=results)
-
-                metrics = results.get("metrics", {})
-                self._set_status(
-                    "Analysis completed: "
-                    f"R peaks={metrics.get('r_peak_count')}, "
-                    f"Mean HR={metrics.get('mean_heart_rate_bpm')} bpm"
-                )
-            except NeuroKit2UnavailableError as exc:
-                self._show_error("Missing dependency", str(exc))
-                self._set_status("Analysis failed: NeuroKit2 is required")
-            except Exception as exc:
-                self._show_error("Analysis error", str(exc))
-                self._set_status(f"Analysis failed: {exc}")
-            finally:
-                self.acquisition_running = False
-
-        def _stop_analysis(self) -> None:
-            if not self.acquisition_running:
-                self._set_status("Stop requested: no active acquisition loop")
+                settings = self._get_current_processing_settings()
+            except ValueError as exc:
+                self._show_error("Invalid processing settings", str(exc))
                 return
 
-            self.acquisition_running = False
-            self._set_status("Acquisition loop stopped")
+            progress_dialog = QProgressDialog(
+                "Processing offline ECG file and computing full analysis. Please wait...",
+                None,
+                0,
+                0,
+                self,
+            )
+            progress_dialog.setWindowTitle("Processing ECG")
+            progress_dialog.setCancelButton(None)
+            progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            progress_dialog.show()
+            QApplication.processEvents()
+
+            self.acquisition_running = True
+            self._set_status("Processing offline ECG file...")
+
+            try:
+                raw_signal, source = self._load_selected_signal(settings["sampling_rate_hz"])
+                results = analyze_ecg(
+                    signal=raw_signal,
+                    sampling_rate=settings["sampling_rate_hz"],
+                    filter_mode=settings["filter_mode"],
+                    low_cut_hz=settings["filter_low_cut_hz"],
+                    high_cut_hz=settings["filter_high_cut_hz"],
+                    powerline_frequency_hz=settings["powerline_frequency_hz"],
+                    rpeak_method=settings["rpeak_method"],
+                )
+                self.latest_results = results
+                self.latest_source = source
+                self.latest_raw_signal = raw_signal
+                self.processing_settings = settings
+                self._update_preview_plots(
+                    raw_signal=np.asarray(results["artifacts"]["raw_signal"], dtype=float),
+                    filtered_signal=np.asarray(results["artifacts"]["filtered_signal"], dtype=float),
+                    results=results,
+                    sampling_rate=settings["sampling_rate_hz"],
+                )
+                self._set_status("Analysis complete. Opening pre-report review window.")
+            except (FileNotFoundError, NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
+                self._show_error("Analysis error", str(exc))
+                self._set_status(f"Analysis failed: {exc}")
+                return
+            finally:
+                self.acquisition_running = False
+                progress_dialog.close()
+
+            self._open_pre_report()
+
+        def _stop_analysis(self) -> None:
+            if self.acquisition_running:
+                self._set_status("Offline analysis is running. It will finish the current file before returning.")
+                return
+            self._set_status("No active offline analysis to stop.")
 
         def _reset_ui(self) -> None:
             self.acquisition_running = False
-            self.filter_armed = False
             self.latest_results = None
             self.latest_source = ""
+            self.latest_raw_signal = None
             self.selected_file = None
+            self.processing_settings = load_processing_settings()
 
-            self.source_selector.setCurrentText(DEFAULT_INPUT_SOURCE)
-            self.low_cut_input.setText(str(DEFAULT_FILTER_LOW_CUT_HZ))
-            self.high_cut_input.setText(str(DEFAULT_FILTER_HIGH_CUT_HZ))
-            self.rpeak_method_selector.setCurrentText(DEFAULT_RPEAK_METHOD)
-
+            self._apply_processing_settings(self.processing_settings)
             self._on_source_mode_changed()
             self._set_initial_plots()
-            self._set_status("State reset")
+            self._set_status("State reset to saved settings")
 
-        def _open_pre_report(self) -> None:
-            if not self.latest_results:
-                self._show_info("Pre-report", "Run Start first to generate a pre-report.")
+        def _save_current_processing_settings(self) -> None:
+            try:
+                settings = self._get_current_processing_settings()
+                path = save_processing_settings(settings)
+            except ValueError as exc:
+                self._show_error("Invalid processing settings", str(exc))
+                return
+            except OSError as exc:
+                self._show_error("Settings save error", f"Could not save settings: {exc}")
                 return
 
-            report_path = save_pre_report(
+            self.processing_settings = settings
+            self._show_info("Settings saved", f"Saved ECG processing settings to:\n{path}")
+            self._set_status(f"Saved ECG processing settings to {path.name}")
+
+        def _open_pre_report(self) -> None:
+            if not self.latest_results or not self.selected_file:
+                self._show_info("Pre-report", "Run Start first to generate a pre-report review.")
+                return
+
+            dialog = PreReportReviewDialog(
                 analysis_results=self.latest_results,
-                output_directory=DEFAULT_OUTPUT_DIR,
-                source=self.latest_source or "unknown",
+                input_file=self.selected_file,
+                source=self.latest_source or f"file:{self.selected_file}",
+                parent=self,
             )
-            try:
-                webbrowser.open(report_path.as_uri())
-            except Exception:
-                pass
+            dialog.exec()
+            self._set_status("Returned from pre-report review window")
 
-            self._set_status(f"Pre-report saved to {report_path}")
+        def _update_preview_plots(
+            self,
+            raw_signal: np.ndarray,
+            filtered_signal: np.ndarray,
+            results: dict[str, Any] | None,
+            sampling_rate: int,
+        ) -> None:
+            time_axis = np.arange(raw_signal.size, dtype=float) / float(sampling_rate)
 
-        def _update_plots(self, raw_signal: np.ndarray, filtered_signal: np.ndarray, results: dict[str, Any]) -> None:
             self.ecg_plot.clear()
-            self.ecg_plot.addLegend()
-            self.ecg_plot.plot(raw_signal, pen=pg.mkPen("#4C72B0", width=1.2), name="Raw ECG")
-            self.ecg_plot.plot(filtered_signal, pen=pg.mkPen("#55A868", width=1.4), name="Filtered ECG")
-            self.ecg_plot.setTitle("Raw ECG + Filtered ECG")
-
-            hr_trace = np.asarray(results.get("artifacts", {}).get("heart_rate_trace_bpm", []), dtype=float)
-            r_peaks = np.asarray(results.get("artifacts", {}).get("r_peaks", []), dtype=int)
+            self.ecg_plot.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0))
+            self.ecg_plot.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2))
+            self.ecg_plot.setTitle("Raw ECG + Filtered ECG preview")
 
             self.hr_plot.clear()
-            self.hr_plot.addLegend()
-            if hr_trace.size:
-                self.hr_plot.plot(hr_trace, pen=pg.mkPen("#8172B3", width=1.4), name="Heart Rate (BPM)")
-            if hr_trace.size and r_peaks.size:
-                valid_peaks = r_peaks[r_peaks < hr_trace.size]
-                if valid_peaks.size:
-                    scatter = pg.ScatterPlotItem(
-                        x=valid_peaks,
-                        y=hr_trace[valid_peaks],
+            self.hr_plot.setTitle("Heart Rate over full duration")
+
+            if results is None:
+                return
+
+            artifacts = results.get("artifacts", {})
+            r_peaks = np.asarray(artifacts.get("r_peaks", []), dtype=int)
+            heart_rate = np.asarray(artifacts.get("heart_rate_trace_bpm", []), dtype=float)
+
+            if heart_rate.size:
+                self.hr_plot.plot(time_axis[: heart_rate.size], heart_rate, pen=pg.mkPen("#8172B3", width=1.2))
+            valid_r_peaks = r_peaks[(r_peaks >= 0) & (r_peaks < filtered_signal.size)]
+            if valid_r_peaks.size:
+                self.ecg_plot.addItem(
+                    pg.ScatterPlotItem(
+                        x=time_axis[valid_r_peaks],
+                        y=filtered_signal[valid_r_peaks],
                         pen=None,
                         brush=pg.mkBrush("#C44E52"),
-                        size=8,
-                        name="R peaks",
+                        size=7,
                     )
-                    self.hr_plot.addItem(scatter)
-            self.hr_plot.setTitle("Heart Rate — R-peak tachometer")
+                )
 
 
 def launch_ecg_ui() -> int:
