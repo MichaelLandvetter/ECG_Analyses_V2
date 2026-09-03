@@ -102,6 +102,89 @@ def _get_missing_ui_dependency_message() -> str | None:
     return message
 
 
+def _collect_per_beat_landmark_points(
+    *,
+    beat_time: np.ndarray,
+    beat_snippets: np.ndarray,
+    beat_landmarks: list[dict[str, Any]],
+    r_peaks: np.ndarray,
+    beat_sample_offsets: np.ndarray,
+    filtered_signal_size: int,
+    sampling_rate_hz: float,
+    landmark_fields: tuple[str, ...],
+) -> dict[str, list[tuple[float, float]]]:
+    """Collect per-beat landmark x/y points for plotting on beat snippets."""
+    points_by_field: dict[str, list[tuple[float, float]]] = {field: [] for field in landmark_fields}
+    if sampling_rate_hz <= 0 or beat_snippets.ndim != 2 or not beat_snippets.size:
+        return points_by_field
+
+    beat_index_to_row: dict[int, dict[str, Any]] = {}
+    for row in beat_landmarks:
+        beat_index = row.get("beat_index")
+        try:
+            beat_key = int(beat_index)
+        except (TypeError, ValueError):
+            continue
+        beat_index_to_row[beat_key] = row
+
+    if beat_sample_offsets.size:
+        pre_samples = max(0, int(abs(np.min(beat_sample_offsets))))
+        post_samples = max(0, int(np.max(beat_sample_offsets)))
+    else:
+        finite_time = np.isfinite(beat_time)
+        if not finite_time.any():
+            return points_by_field
+        min_time = float(np.nanmin(beat_time[finite_time]))
+        max_time = float(np.nanmax(beat_time[finite_time]))
+        pre_samples = max(0, int(round(-min_time * sampling_rate_hz)))
+        post_samples = max(0, int(round(max_time * sampling_rate_hz)))
+
+    snippet_index = 0
+    for beat_index, r_peak_sample in enumerate(r_peaks, start=1):
+        start = int(r_peak_sample) - pre_samples
+        stop = int(r_peak_sample) + post_samples + 1
+        if start < 0 or stop > filtered_signal_size:
+            continue
+        if snippet_index >= beat_snippets.shape[0]:
+            break
+
+        row = beat_index_to_row.get(beat_index)
+        beat_trace = beat_snippets[snippet_index]
+        snippet_index += 1
+        if row is None:
+            continue
+
+        finite_beat = np.isfinite(beat_time) & np.isfinite(beat_trace)
+        if not finite_beat.any():
+            continue
+        x_min = float(np.nanmin(beat_time[finite_beat]))
+        x_max = float(np.nanmax(beat_time[finite_beat]))
+
+        r_value = row.get("r_peak_sample")
+        try:
+            r_peak_float = float(r_value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(r_peak_float):
+            continue
+
+        for field in landmark_fields:
+            sample_value = row.get(field)
+            try:
+                sample_float = float(sample_value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(sample_float):
+                continue
+            marker_x = (sample_float - r_peak_float) / sampling_rate_hz
+            if not np.isfinite(marker_x) or marker_x < x_min or marker_x > x_max:
+                continue
+            marker_y = float(np.interp(marker_x, beat_time[finite_beat], beat_trace[finite_beat]))
+            points_by_field[field].append((float(marker_x), marker_y))
+
+    return points_by_field
+
+
 if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
     class ReviewPlotWidget(pg.PlotWidget):
@@ -229,6 +312,12 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 "Reports saved",
                 f"Saved report files to:\n{folder_path}",
             )
+            self.accept()
+            parent_window = self.parentWidget()
+            if parent_window is not None:
+                parent_window.raise_()
+                parent_window.activateWindow()
+                parent_window.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
         def _plot_ecg_overview(self, plot_widget: pg.PlotWidget) -> None:
             artifacts = self.analysis_results.get("artifacts", {})
@@ -269,6 +358,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             beat_time = np.asarray(artifacts.get("beat_time_offsets_seconds", []), dtype=float)
             beat_snippets = np.asarray(artifacts.get("beat_snippets", []), dtype=float)
             average_template = np.asarray(artifacts.get("average_template", []), dtype=float)
+            beat_sample_offsets = np.asarray(artifacts.get("beat_sample_offsets", []), dtype=int)
+            r_peaks = np.asarray(artifacts.get("r_peaks", []), dtype=int)
+            filtered_signal = np.asarray(artifacts.get("filtered_signal", []), dtype=float)
             beat_landmarks = self.analysis_results.get("report_tables", {}).get("beat_morphology_landmarks", [])
 
             if beat_snippets.ndim == 2 and beat_snippets.size:
@@ -287,41 +379,50 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 ("s_peak_sample", "S", "#FF7F0E", "s"),
                 ("t_peak_sample", "T", "#9467BD", "o"),
             )
+            per_beat_points = _collect_per_beat_landmark_points(
+                beat_time=beat_time,
+                beat_snippets=beat_snippets,
+                beat_landmarks=beat_landmarks,
+                r_peaks=r_peaks,
+                beat_sample_offsets=beat_sample_offsets,
+                filtered_signal_size=int(filtered_signal.size),
+                sampling_rate_hz=sampling_rate_hz,
+                landmark_fields=tuple(spec[0] for spec in marker_specs),
+            )
+            finite_wave = np.isfinite(beat_time) & finite_template
             for sample_field, label, color, symbol in marker_specs:
-                relative_positions: list[float] = []
-                for row in beat_landmarks:
-                    sample_value = row.get(sample_field)
-                    r_peak_sample = row.get("r_peak_sample")
-                    if sample_value is None or r_peak_sample is None:
-                        continue
-                    try:
-                        sample_float = float(sample_value)
-                        r_peak_float = float(r_peak_sample)
-                    except (TypeError, ValueError):
-                        continue
-                    if not np.isfinite(sample_float) or not np.isfinite(r_peak_float):
-                        continue
-                    if sampling_rate_hz <= 0:
-                        continue
-                    relative_positions.append((sample_float - r_peak_float) / sampling_rate_hz)
-                finite_wave = np.isfinite(beat_time) & finite_template
-                if not relative_positions or not finite_wave.any():
+                points = per_beat_points.get(sample_field, [])
+                if not points:
                     continue
+                x_points = [point[0] for point in points]
+                y_points = [point[1] for point in points]
 
-                marker_x = float(np.nanmedian(np.asarray(relative_positions, dtype=float)))
-                marker_x = float(np.clip(marker_x, np.nanmin(beat_time[finite_wave]), np.nanmax(beat_time[finite_wave])))
+                plot_widget.plot(
+                    x_points,
+                    y_points,
+                    pen=None,
+                    symbol=symbol,
+                    symbolSize=7,
+                    symbolBrush=pg.mkBrush(color),
+                    symbolPen=pg.mkPen(color),
+                )
+
+                if not finite_wave.any():
+                    continue
+                marker_x = float(np.nanmedian(np.asarray(x_points, dtype=float)))
                 marker_y = float(np.interp(marker_x, beat_time[finite_wave], average_template[finite_wave]))
-
+                average_color = pg.mkColor(color)
+                average_color.setAlpha(120)
                 plot_widget.plot(
                     [marker_x],
                     [marker_y],
                     pen=None,
                     symbol=symbol,
-                    symbolSize=11,
-                    symbolBrush=pg.mkBrush(color),
-                    symbolPen=pg.mkPen(color),
+                    symbolSize=5,
+                    symbolBrush=pg.mkBrush(average_color),
+                    symbolPen=pg.mkPen(average_color),
                 )
-                label_item = pg.TextItem(text=label, color=color, anchor=(0.5, 1.4))
+                label_item = pg.TextItem(text=label, color=average_color, anchor=(0.5, 1.4))
                 label_item.setPos(marker_x, marker_y)
                 plot_widget.addItem(label_item)
 
