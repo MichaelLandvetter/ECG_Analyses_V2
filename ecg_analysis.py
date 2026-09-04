@@ -194,6 +194,77 @@ def clean_ecg_signal(
         raise RuntimeError(f"NeuroKit2 failed to clean ECG signal: {exc}") from exc
 
 
+def estimate_live_heart_rate_trace(
+    signal: Sequence[float] | np.ndarray,
+    sampling_rate: int,
+) -> np.ndarray:
+    """Estimate a lightweight streaming heart-rate trace from a filtered ECG signal."""
+    if sampling_rate <= 0:
+        raise ValueError("sampling_rate must be greater than 0")
+
+    signal_array = np.asarray(signal, dtype=float).flatten()
+    if signal_array.size < max(3, int(0.8 * sampling_rate)):
+        return np.full(signal_array.size, np.nan, dtype=float)
+
+    try:
+        from scipy.signal import find_peaks
+
+        minimum_distance = max(1, int(0.3 * sampling_rate))
+        prominence = max(0.05, float(np.nanstd(signal_array)) * 0.5)
+        peaks, _properties = find_peaks(signal_array, distance=minimum_distance, prominence=prominence)
+    except Exception:
+        candidate = np.where(
+            (signal_array[1:-1] > signal_array[:-2]) & (signal_array[1:-1] >= signal_array[2:]),
+        )[0] + 1
+        minimum_distance = max(1, int(0.3 * sampling_rate))
+        if not candidate.size:
+            peaks = np.array([], dtype=int)
+        else:
+            selected_peaks: list[int] = []
+            selected_amplitudes: list[float] = []
+            for peak in candidate:
+                peak_int = int(peak)
+                peak_amplitude = float(signal_array[peak_int])
+                if not selected_peaks:
+                    selected_peaks.append(peak_int)
+                    selected_amplitudes.append(peak_amplitude)
+                    continue
+                if peak_int - selected_peaks[-1] < minimum_distance:
+                    if peak_amplitude > selected_amplitudes[-1]:
+                        selected_peaks[-1] = peak_int
+                        selected_amplitudes[-1] = peak_amplitude
+                    continue
+                selected_peaks.append(peak_int)
+                selected_amplitudes.append(peak_amplitude)
+            peaks = np.asarray(selected_peaks, dtype=int)
+
+    peaks = np.asarray(peaks, dtype=int)
+    if peaks.size < 2:
+        return np.full(signal_array.size, np.nan, dtype=float)
+
+    hr_trace = np.full(signal_array.size, np.nan, dtype=float)
+    first_valid_bpm: float | None = None
+    last_valid_bpm: float | None = None
+    for left_peak, right_peak in zip(peaks[:-1], peaks[1:]):
+        rr_samples = right_peak - left_peak
+        if rr_samples <= 0:
+            continue
+        bpm = 60.0 * float(sampling_rate) / float(rr_samples)
+        if not np.isfinite(bpm):
+            continue
+        if first_valid_bpm is None:
+            first_valid_bpm = bpm
+        last_valid_bpm = bpm
+        hr_trace[left_peak : right_peak + 1] = bpm
+    if first_valid_bpm is not None:
+        first_peak = int(peaks[0])
+        hr_trace[:first_peak] = first_valid_bpm
+    if last_valid_bpm is not None:
+        last_peak = int(peaks[-1])
+        hr_trace[last_peak:] = last_valid_bpm
+    return hr_trace
+
+
 def detect_r_peaks(
     signal: Sequence[float] | np.ndarray,
     sampling_rate: int,
