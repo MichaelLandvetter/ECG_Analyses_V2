@@ -194,6 +194,47 @@ def clean_ecg_signal(
         raise RuntimeError(f"NeuroKit2 failed to clean ECG signal: {exc}") from exc
 
 
+def estimate_live_heart_rate_trace(
+    signal: Sequence[float] | np.ndarray,
+    sampling_rate: int,
+) -> np.ndarray:
+    """Estimate a lightweight streaming heart-rate trace from a filtered ECG signal."""
+    if sampling_rate <= 0:
+        raise ValueError("sampling_rate must be greater than 0")
+
+    signal_array = np.asarray(signal, dtype=float).flatten()
+    if signal_array.size < max(3, int(0.8 * sampling_rate)):
+        return np.full(signal_array.size, np.nan, dtype=float)
+
+    try:
+        from scipy.signal import find_peaks
+
+        minimum_distance = max(1, int(0.3 * sampling_rate))
+        prominence = max(0.05, float(np.nanstd(signal_array)) * 0.5)
+        peaks, _properties = find_peaks(signal_array, distance=minimum_distance, prominence=prominence)
+    except Exception:
+        candidate = np.where(
+            (signal_array[1:-1] > signal_array[:-2]) & (signal_array[1:-1] >= signal_array[2:]),
+        )[0] + 1
+        minimum_distance = max(1, int(0.3 * sampling_rate))
+        peaks = candidate[::minimum_distance] if candidate.size else np.array([], dtype=int)
+
+    peaks = np.asarray(peaks, dtype=int)
+    if peaks.size < 2:
+        return np.full(signal_array.size, np.nan, dtype=float)
+
+    hr_trace = np.full(signal_array.size, np.nan, dtype=float)
+    for left_peak, right_peak in zip(peaks[:-1], peaks[1:], strict=False):
+        rr_samples = right_peak - left_peak
+        if rr_samples <= 0:
+            continue
+        bpm = 60.0 * float(sampling_rate) / float(rr_samples)
+        if not np.isfinite(bpm):
+            continue
+        hr_trace[left_peak : right_peak + 1] = bpm
+    return hr_trace
+
+
 def detect_r_peaks(
     signal: Sequence[float] | np.ndarray,
     sampling_rate: int,
