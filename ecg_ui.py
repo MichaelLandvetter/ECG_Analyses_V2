@@ -366,8 +366,16 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             if beat_snippets.ndim == 2 and beat_snippets.size:
                 for beat in beat_snippets:
-                    plot_widget.plot(beat_time, beat, pen=pg.mkPen("#B0B0B0", width=0.8))
-            plot_widget.plot(beat_time, average_template, pen=pg.mkPen("#C44E52", width=2.0))
+                    beat_len = min(beat_time.size, beat.size)
+                    if beat_len:
+                        plot_widget.plot(beat_time[:beat_len], beat[:beat_len], pen=pg.mkPen("#B0B0B0", width=0.8))
+            template_len = min(beat_time.size, average_template.size)
+            if template_len:
+                plot_widget.plot(
+                    beat_time[:template_len],
+                    average_template[:template_len],
+                    pen=pg.mkPen("#C44E52", width=2.0),
+                )
             plot_widget.setLabel("bottom", "Time from R-peak (s)")
             plot_widget.setLabel("left", "Amplitude")
             plot_widget.setTitle(self.beat_panel.title if hasattr(self, "beat_panel") else "Beat snippets")
@@ -390,7 +398,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 sampling_rate_hz=sampling_rate_hz,
                 landmark_fields=tuple(spec[0] for spec in marker_specs),
             )
-            finite_wave = np.isfinite(beat_time) & finite_template
+            if beat_time.size == average_template.size:
+                finite_wave = np.isfinite(beat_time) & finite_template
+            else:
+                finite_wave = np.array([], dtype=bool)
             for sample_field, label, color, symbol in marker_specs:
                 points = per_beat_points.get(sample_field, [])
                 if not points:
@@ -439,7 +450,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.selected_file: str | None = None
             self.acquisition_running = False
             self.usb_acquisition_state = "idle"
-            self.usb_session_samples = np.array([], dtype=float)
+            self.usb_session_chunks: list[np.ndarray] = []
+            self.usb_session_settings: dict[str, Any] | None = None
             self.latest_report_input_file: str | None = None
             self.latest_results: dict[str, Any] | None = None
             self.latest_source = ""
@@ -687,9 +699,18 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.file_button.setEnabled(is_file_mode)
 
             if not is_file_mode:
-                self.file_status_label.setText("USB Input active. Use Start / Pause / Resume / End controls.")
+                self.file_status_label.setText(
+                    "USB Input active (simulated capture placeholder). Use Start / Pause / Resume / End controls."
+                )
                 if self.usb_acquisition_state == "idle":
-                    self._set_status("USB Input ready. Click Start to begin acquisition.")
+                    if (
+                        self.latest_results is not None
+                        and self.latest_report_input_file is not None
+                        and self.latest_source.startswith("usb_saved:")
+                    ):
+                        self._set_status("USB results ready. Save reports or Reset before starting a new session.")
+                    else:
+                        self._set_status("USB Input ready. Click Start to begin simulated acquisition.")
             elif self.selected_file:
                 self.file_status_label.setText(Path(self.selected_file).name)
             else:
@@ -698,7 +719,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
         def _update_action_controls(self) -> None:
             is_file_mode = self.source_selector.currentText() == "File Analysis"
-            has_results = self.latest_results is not None and self.latest_report_input_file is not None
+            has_any_results = self.latest_results is not None and self.latest_report_input_file is not None
+            has_usb_results = has_any_results and self.latest_source.startswith("usb_saved:")
+            has_results = has_any_results and ((is_file_mode and not has_usb_results) or (not is_file_mode and has_usb_results))
 
             if is_file_mode:
                 self.start_button.setText("Re-run Analysis" if has_results else "Start")
@@ -706,8 +729,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self.pause_resume_button.setEnabled(False)
                 self.end_button.setEnabled(False)
             else:
+                has_completed_usb_results = has_results and self.usb_acquisition_state == "idle"
                 self.start_button.setText("Start")
-                self.start_button.setEnabled(self.usb_acquisition_state == "idle")
+                self.start_button.setEnabled(self.usb_acquisition_state == "idle" and not has_completed_usb_results)
                 self.pause_resume_button.setText("Resume" if self.usb_acquisition_state == "paused" else "Pause")
                 self.pause_resume_button.setEnabled(self.usb_acquisition_state in {"running", "paused"})
                 self.end_button.setEnabled(self.usb_acquisition_state in {"running", "paused"})
@@ -862,14 +886,26 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._set_status("USB acquisition already started.")
                 return
 
-            self.usb_session_samples = np.array([], dtype=float)
+            try:
+                settings = self._get_current_processing_settings()
+            except ValueError as exc:
+                self._show_error("Invalid processing settings", str(exc))
+                return
+
+            self.usb_session_chunks = []
+            self.usb_session_settings = settings
             self.usb_acquisition_state = "running"
             self.acquisition_running = True
             self.latest_results = None
             self.latest_report_input_file = None
             self.latest_source = ""
             self.latest_raw_signal = None
-            self._set_status("USB acquisition started.")
+            self._set_initial_plots()
+            self._append_usb_chunk(
+                sampling_rate=settings["sampling_rate_hz"],
+                rolling_window_seconds=settings["rolling_window_seconds"],
+            )
+            self._set_status("USB acquisition started (simulated placeholder data).")
             self._refresh_usb_preview_plot()
             self._update_action_controls()
 
@@ -882,9 +918,16 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 return
 
             if self.usb_acquisition_state == "paused":
+                if self.usb_session_settings is None:
+                    self._show_error("USB Input", "USB session settings are missing. Reset and start again.")
+                    return
                 self.usb_acquisition_state = "running"
                 self.acquisition_running = True
-                self._set_status("USB acquisition resumed.")
+                self._append_usb_chunk(
+                    sampling_rate=self.usb_session_settings["sampling_rate_hz"],
+                    rolling_window_seconds=self.usb_session_settings["rolling_window_seconds"],
+                )
+                self._set_status("USB acquisition resumed (simulated placeholder data).")
                 self._refresh_usb_preview_plot()
                 self._update_action_controls()
 
@@ -893,15 +936,19 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._set_status("No active USB acquisition to end.")
                 return
 
-            self.acquisition_running = False
-            self.usb_acquisition_state = "idle"
+            previous_state = self.usb_acquisition_state
+            session_file: Path | None = None
+            self.acquisition_running = True
+            self.usb_acquisition_state = "ending"
             self._update_action_controls()
             self._set_status("Finalizing USB session and running analysis...")
             QApplication.processEvents()
 
             try:
-                settings = self._get_current_processing_settings()
-                raw_signal = np.asarray(self.usb_session_samples, dtype=float)
+                if self.usb_session_settings is None:
+                    raise ValueError("USB session settings are missing. Reset and start a new session.")
+                settings = self.usb_session_settings
+                raw_signal = self._get_usb_session_signal()
                 if raw_signal.size < 3:
                     raise ValueError("USB session is too short. Acquire more data before ending.")
                 session_file = self._save_usb_session_to_file(raw_signal)
@@ -913,10 +960,21 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     settings=settings,
                     completion_status="USB session ended. Analysis results are ready in Analysis View.",
                 )
-                self._open_detailed_review()
+                self.usb_acquisition_state = "idle"
+                self.acquisition_running = False
+                self.usb_session_chunks = []
+                self.usb_session_settings = None
             except (NeuroKit2UnavailableError, RuntimeError, ValueError, OSError) as exc:
+                if session_file is not None:
+                    self.usb_acquisition_state = "idle"
+                    self.usb_session_chunks = []
+                    self.usb_session_settings = None
+                    self._set_status(f"USB capture saved to {session_file}, but analysis failed: {exc}")
+                else:
+                    self.usb_acquisition_state = previous_state
+                    self._set_status(f"USB processing failed: {exc}")
+                self.acquisition_running = False
                 self._show_error("USB processing error", str(exc))
-                self._set_status(f"USB processing failed: {exc}")
             finally:
                 self._update_action_controls()
 
@@ -925,18 +983,24 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             time_axis = np.arange(chunk_size, dtype=float) / float(sampling_rate)
             return 0.8 * np.sin(2 * np.pi * 1.2 * time_axis) + 0.08 * np.sin(2 * np.pi * 23.0 * time_axis)
 
+        def _append_usb_chunk(self, sampling_rate: int, rolling_window_seconds: int) -> None:
+            chunk = self._generate_usb_chunk(
+                sampling_rate=sampling_rate,
+                rolling_window_seconds=rolling_window_seconds,
+            )
+            self.usb_session_chunks.append(np.asarray(chunk, dtype=float))
+
+        def _get_usb_session_signal(self) -> np.ndarray:
+            if not self.usb_session_chunks:
+                return np.array([], dtype=float)
+            return np.concatenate(self.usb_session_chunks)
+
         def _refresh_usb_preview_plot(self) -> None:
-            try:
-                settings = self._get_current_processing_settings()
-            except ValueError:
+            settings = self.usb_session_settings
+            if settings is None:
                 return
 
-            chunk = self._generate_usb_chunk(
-                sampling_rate=settings["sampling_rate_hz"],
-                rolling_window_seconds=settings["rolling_window_seconds"],
-            )
-            self.usb_session_samples = np.concatenate([self.usb_session_samples, chunk])
-            raw_signal = np.asarray(self.usb_session_samples, dtype=float)
+            raw_signal = self._get_usb_session_signal()
             if raw_signal.size < 3:
                 return
 
@@ -960,9 +1024,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             )
 
         def _save_usb_session_to_file(self, signal: np.ndarray) -> Path:
-            session_dir = Path(__file__).resolve().parent / "USB_Sessions"
+            session_dir = Path.cwd() / "USB_Sessions"
             session_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             session_file = session_dir / f"usb_session_{timestamp}.csv"
             np.savetxt(session_file, signal, delimiter=",")
             return session_file
@@ -996,14 +1060,22 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 results=results,
                 sampling_rate=settings["sampling_rate_hz"],
             )
-            self.tabs.setCurrentIndex(0)
+            self._show_analysis_tab()
             self._set_status(completion_status)
             self._update_action_controls()
+
+        def _show_analysis_tab(self) -> None:
+            for tab_index in range(self.tabs.count()):
+                if self.tabs.tabText(tab_index) == "Analysis View":
+                    self.tabs.setCurrentIndex(tab_index)
+                    return
+            self.tabs.setCurrentIndex(0)
 
         def _reset_ui(self) -> None:
             self.acquisition_running = False
             self.usb_acquisition_state = "idle"
-            self.usb_session_samples = np.array([], dtype=float)
+            self.usb_session_chunks = []
+            self.usb_session_settings = None
             self.latest_results = None
             self.latest_source = ""
             self.latest_raw_signal = None
@@ -1037,12 +1109,17 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._show_info("Save Reports", "Run analysis first to enable report export.")
                 return
 
-            output_paths = save_structured_reports(
-                analysis_results=self.latest_results,
-                input_file=self.latest_report_input_file,
-                source=self.latest_source or f"file:{self.latest_report_input_file}",
-                write_json=False,
-            )
+            try:
+                output_paths = save_structured_reports(
+                    analysis_results=self.latest_results,
+                    input_file=self.latest_report_input_file,
+                    source=self.latest_source or f"file:{self.latest_report_input_file}",
+                    write_json=False,
+                )
+            except OSError as exc:
+                self._show_error("Report export error", f"Could not save reports: {exc}")
+                self._set_status(f"Report export failed: {exc}")
+                return
             folder_path = output_paths["summary_metrics_csv"].parent
             self._show_info("Reports saved", f"Saved report files to:\n{folder_path}")
             self._set_status(f"Reports saved to {folder_path}")
@@ -1114,8 +1191,16 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             if beat_snippets.ndim == 2 and beat_snippets.size:
                 for beat in beat_snippets:
-                    plot_widget.plot(beat_time, beat, pen=pg.mkPen("#B0B0B0", width=0.8))
-            plot_widget.plot(beat_time, average_template, pen=pg.mkPen("#C44E52", width=2.0))
+                    beat_len = min(beat_time.size, beat.size)
+                    if beat_len:
+                        plot_widget.plot(beat_time[:beat_len], beat[:beat_len], pen=pg.mkPen("#B0B0B0", width=0.8))
+            template_len = min(beat_time.size, average_template.size)
+            if template_len:
+                plot_widget.plot(
+                    beat_time[:template_len],
+                    average_template[:template_len],
+                    pen=pg.mkPen("#C44E52", width=2.0),
+                )
             plot_widget.setLabel("bottom", "Time from R-peak (s)")
             plot_widget.setLabel("left", "Amplitude")
 
@@ -1137,7 +1222,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 sampling_rate_hz=sampling_rate_hz,
                 landmark_fields=tuple(spec[0] for spec in marker_specs),
             )
-            finite_wave = np.isfinite(beat_time) & finite_template
+            if beat_time.size == average_template.size:
+                finite_wave = np.isfinite(beat_time) & finite_template
+            else:
+                finite_wave = np.array([], dtype=bool)
             for sample_field, label, color, symbol in marker_specs:
                 points = per_beat_points.get(sample_field, [])
                 if not points:

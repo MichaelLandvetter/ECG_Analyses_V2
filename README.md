@@ -49,11 +49,12 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 ## USB Input workflow
 
 1. Select **USB Input** in Box 1.
-2. Click **Start** to begin acquisition.
+2. Click **Start** to begin acquisition (currently a simulated capture placeholder until hardware integration is added).
 3. Click **Pause** and **Resume** as needed during the same acquisition session.
 4. Click **End** to finalize the session and save the raw USB capture file.
-5. The app then runs the same offline analysis pipeline used by File Analysis and opens the detailed review view.
-6. Use **Save Reports** to export reports from the completed USB session analysis.
+5. The app then runs the same offline analysis pipeline used by File Analysis and renders results in the main **Analysis View**.
+6. Optionally click **Open Detailed Review** for expanded review plots.
+7. Use **Save Reports** to export reports from the completed USB session analysis.
 
 ## ECG Processing Settings tab
 
@@ -76,7 +77,9 @@ On startup the app loads `ecg_settings.json` if it is present and valid. If the 
 
 When **Save Reports** is used after File Analysis or USB End analysis:
 
-1. A `Reports/` folder is created next to the selected input file if it does not already exist.
+1. A `Reports/` folder is created next to the analysis input file if it does not already exist.
+   - File Analysis input file: user-selected ECG file
+   - USB session input file: generated capture under `<app_working_directory>/USB_Sessions/usb_session_<YYYYMMDD_HHMMSS_microseconds>.csv`
 2. A per-run folder is created inside `Reports/` using:
 
    ```text
