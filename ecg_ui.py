@@ -215,8 +215,17 @@ def _derive_action_controls(
     controls["pause_text"] = "Resume" if usb_acquisition_state == "paused" else "Pause"
     controls["pause_enabled"] = usb_acquisition_state in {"running", "paused"}
     controls["end_enabled"] = usb_acquisition_state in {"running", "paused"}
-    controls["start_enabled"] = usb_acquisition_state == "idle" and not has_results
+    controls["start_enabled"] = usb_acquisition_state == "idle"
     return controls
+
+
+def _should_process_usb_stream_tick(
+    *,
+    usb_acquisition_state: str,
+    usb_session_settings: dict[str, Any] | None,
+) -> bool:
+    """Return whether the USB timer tick should append and refresh data."""
+    return usb_acquisition_state == "running" and usb_session_settings is not None
 
 
 if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
@@ -291,7 +300,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.input_file = input_file
             self.source = source
 
-            self.setWindowTitle("ECG Detailed Review")
+            self.setWindowTitle("ECG Pre-report Review")
             self.setMinimumSize(1080, 700)
             self._fit_window_to_common_laptop_display()
 
@@ -492,6 +501,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_source = ""
             self.latest_result_mode: str | None = None
             self.latest_raw_signal: np.ndarray | None = None
+            self._analysis_layout_file_mode: bool | None = None
             self.processing_settings = load_processing_settings()
 
             central_widget = QWidget(self)
@@ -737,6 +747,13 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.high_cut_input.setEnabled(is_butterworth)
 
         def _apply_analysis_layout(self, is_file_mode: bool) -> None:
+            if self._analysis_layout_file_mode == is_file_mode:
+                self.beat_plot.setVisible(is_file_mode)
+                return
+
+            self.analysis_grid.removeWidget(self.ecg_plot)
+            self.analysis_grid.removeWidget(self.hr_plot)
+            self.analysis_grid.removeWidget(self.beat_plot)
             self.analysis_grid.addWidget(self.ecg_plot, 0, 0, 1, 2 if not is_file_mode else 1)
             self.analysis_grid.addWidget(self.hr_plot, 1, 0, 1, 2 if not is_file_mode else 1)
             self.analysis_grid.addWidget(self.beat_plot, 0, 1, 2, 1)
@@ -745,6 +762,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.analysis_grid.setColumnStretch(1, 2 if is_file_mode else 0)
             self.analysis_grid.setRowStretch(0, 1)
             self.analysis_grid.setRowStretch(1, 1)
+            self._analysis_layout_file_mode = is_file_mode
 
         def _on_source_mode_changed(self) -> None:
             is_file_mode = self.source_selector.currentText() == "File Analysis"
@@ -1025,9 +1043,16 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     self.usb_session_chunks = []
                     self.usb_session_settings = None
                     self.usb_sample_cursor = 0
+                    self.latest_results = None
+                    self.latest_source = ""
+                    self.latest_result_mode = None
+                    self.latest_raw_signal = None
+                    self.latest_report_input_file = None
                     self._set_status(f"USB capture saved to {session_file}, but analysis failed: {exc}")
                 else:
                     self.usb_acquisition_state = previous_state
+                    if previous_state == "running":
+                        self.usb_timer.start()
                     self._set_status(f"USB processing failed: {exc}")
                 self.acquisition_running = False
                 self._show_error("USB processing error", str(exc))
@@ -1035,7 +1060,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._update_action_controls()
 
         def _on_usb_stream_tick(self) -> None:
-            if self.usb_acquisition_state != "running" or self.usb_session_settings is None:
+            if not _should_process_usb_stream_tick(
+                usb_acquisition_state=self.usb_acquisition_state,
+                usb_session_settings=self.usb_session_settings,
+            ):
                 return
             self._append_usb_chunk(sampling_rate=self.usb_session_settings["sampling_rate_hz"])
             self._refresh_usb_preview_plot()
@@ -1068,9 +1096,16 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             if raw_signal.size < 3:
                 return
 
+            window_samples = max(
+                3,
+                int(settings["sampling_rate_hz"] * max(1, int(settings["rolling_window_seconds"]))),
+            )
+            preview_start = max(0, raw_signal.size - window_samples)
+            preview_raw = raw_signal[preview_start:]
+
             try:
                 filtered_signal = clean_ecg_signal(
-                    signal=raw_signal,
+                    signal=preview_raw,
                     sampling_rate=settings["sampling_rate_hz"],
                     filter_mode=settings["filter_mode"],
                     low_cut_hz=settings["filter_low_cut_hz"],
@@ -1078,15 +1113,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     powerline_frequency_hz=settings["powerline_frequency_hz"],
                 )
             except (NeuroKit2UnavailableError, RuntimeError, ValueError):
-                filtered_signal = raw_signal.copy()
+                filtered_signal = preview_raw.copy()
 
-            window_samples = max(
-                3,
-                int(settings["sampling_rate_hz"] * max(1, int(settings["rolling_window_seconds"]))),
-            )
-            preview_start = max(0, raw_signal.size - window_samples)
-            preview_raw = raw_signal[preview_start:]
-            preview_filtered = filtered_signal[preview_start:]
+            preview_filtered = filtered_signal
             live_hr = estimate_live_heart_rate_trace(
                 signal=preview_filtered,
                 sampling_rate=settings["sampling_rate_hz"],

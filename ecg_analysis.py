@@ -217,21 +217,51 @@ def estimate_live_heart_rate_trace(
             (signal_array[1:-1] > signal_array[:-2]) & (signal_array[1:-1] >= signal_array[2:]),
         )[0] + 1
         minimum_distance = max(1, int(0.3 * sampling_rate))
-        peaks = candidate[::minimum_distance] if candidate.size else np.array([], dtype=int)
+        if not candidate.size:
+            peaks = np.array([], dtype=int)
+        else:
+            selected_peaks: list[int] = []
+            selected_amplitudes: list[float] = []
+            for peak in candidate:
+                peak_int = int(peak)
+                peak_amplitude = float(signal_array[peak_int])
+                if not selected_peaks:
+                    selected_peaks.append(peak_int)
+                    selected_amplitudes.append(peak_amplitude)
+                    continue
+                if peak_int - selected_peaks[-1] < minimum_distance:
+                    if peak_amplitude > selected_amplitudes[-1]:
+                        selected_peaks[-1] = peak_int
+                        selected_amplitudes[-1] = peak_amplitude
+                    continue
+                selected_peaks.append(peak_int)
+                selected_amplitudes.append(peak_amplitude)
+            peaks = np.asarray(selected_peaks, dtype=int)
 
     peaks = np.asarray(peaks, dtype=int)
     if peaks.size < 2:
         return np.full(signal_array.size, np.nan, dtype=float)
 
     hr_trace = np.full(signal_array.size, np.nan, dtype=float)
-    for left_peak, right_peak in zip(peaks[:-1], peaks[1:], strict=False):
+    first_valid_bpm: float | None = None
+    last_valid_bpm: float | None = None
+    for left_peak, right_peak in zip(peaks[:-1], peaks[1:]):
         rr_samples = right_peak - left_peak
         if rr_samples <= 0:
             continue
         bpm = 60.0 * float(sampling_rate) / float(rr_samples)
         if not np.isfinite(bpm):
             continue
+        if first_valid_bpm is None:
+            first_valid_bpm = bpm
+        last_valid_bpm = bpm
         hr_trace[left_peak : right_peak + 1] = bpm
+    if first_valid_bpm is not None:
+        first_peak = int(peaks[0])
+        hr_trace[:first_peak] = first_valid_bpm
+    if last_valid_bpm is not None:
+        last_peak = int(peaks[-1])
+        hr_trace[last_peak:] = last_valid_bpm
     return hr_trace
 
 
