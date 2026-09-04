@@ -10,7 +10,7 @@ DEFAULT_SAMPLING_RATE: int = 250
 DEFAULT_SYNTHETIC_DURATION_SECONDS: int = 10
 DEFAULT_OUTPUT_DIR: str = "output"
 DEFAULT_INPUT_COLUMN_INDEX: int = 0
-DEFAULT_INPUT_SOURCE: str = "File Replay"
+DEFAULT_INPUT_SOURCE: str = "File Analysis"
 DEFAULT_FILTER_MODE: str = "NeuroKit2 ecg_clean"
 DEFAULT_FILTER_LOW_CUT_HZ: float = 0.5
 DEFAULT_FILTER_HIGH_CUT_HZ: float = 40.0
@@ -65,6 +65,16 @@ def _coerce_choice(value: Any, fallback: str, allowed_values: set[str]) -> str:
     return value_string if value_string in allowed_values else fallback
 
 
+def normalize_input_source(value: Any, fallback: str = DEFAULT_INPUT_SOURCE) -> str:
+    """Map persisted input-source values to the canonical user-facing labels."""
+    value_string = str(value).strip()
+    if value_string == "File Replay":
+        return "File Analysis"
+    if value_string in {"File Analysis", "USB Input"}:
+        return value_string
+    return fallback
+
+
 def load_processing_settings(settings_path: Path | None = None) -> dict[str, Any]:
     """Load persisted processing settings, falling back to defaults when needed."""
     defaults = get_default_processing_settings()
@@ -81,11 +91,7 @@ def load_processing_settings(settings_path: Path | None = None) -> dict[str, Any
         return defaults
 
     return {
-        "input_source": _coerce_choice(
-            payload.get("input_source", defaults["input_source"]),
-            defaults["input_source"],
-            {"File Replay", "USB Input"},
-        ),
+        "input_source": normalize_input_source(payload.get("input_source", defaults["input_source"])),
         "sampling_rate_hz": _coerce_int(payload.get("sampling_rate_hz"), defaults["sampling_rate_hz"]),
         "filter_mode": _coerce_choice(
             payload.get("filter_mode", defaults["filter_mode"]),

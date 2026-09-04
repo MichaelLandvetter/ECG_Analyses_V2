@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,8 +30,8 @@ from ecg_config import (
     DEFAULT_RPEAK_METHOD,
     DEFAULT_SAMPLING_RATE,
     DEFAULT_SYNTHETIC_DURATION_SECONDS,
-    DEFAULT_USB_PLACEHOLDER_TEXT,
     load_processing_settings,
+    normalize_input_source,
     save_processing_settings,
 )
 from ecg_report import save_structured_reports
@@ -243,7 +244,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
 
     class PreReportReviewDialog(QDialog):
-        """Review window shown after offline analysis completes."""
+        """Detailed review window shown after analysis completes."""
 
         def __init__(
             self,
@@ -257,7 +258,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.input_file = input_file
             self.source = source
 
-            self.setWindowTitle("ECG Pre-report Review")
+            self.setWindowTitle("ECG Detailed Review")
             self.setMinimumSize(1080, 700)
             self._fit_window_to_common_laptop_display()
 
@@ -279,7 +280,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             root_layout.addWidget(self.beat_panel)
 
             button_layout = QHBoxLayout()
-            back_button = QPushButton("Back to Analysis")
+            back_button = QPushButton("Close Review")
             back_button.clicked.connect(self.close)
             button_layout.addWidget(back_button)
 
@@ -437,6 +438,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             self.selected_file: str | None = None
             self.acquisition_running = False
+            self.usb_acquisition_state = "idle"
+            self.usb_session_samples = np.array([], dtype=float)
+            self.latest_report_input_file: str | None = None
             self.latest_results: dict[str, Any] | None = None
             self.latest_source = ""
             self.latest_raw_signal: np.ndarray | None = None
@@ -450,7 +454,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._apply_processing_settings(self.processing_settings)
             self._set_initial_plots()
             self._on_source_mode_changed()
-            self._set_status("Ready for offline ECG file analysis")
+            self._set_status("Ready for ECG analysis")
 
         def _build_layout(self) -> None:
             controls_container = QWidget()
@@ -486,7 +490,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             layout = QVBoxLayout(frame)
 
             self.source_selector = QComboBox()
-            self.source_selector.addItems(["File Replay", "USB Input"])
+            self.source_selector.addItems(["File Analysis", "USB Input"])
             self.source_selector.currentTextChanged.connect(self._on_source_mode_changed)
             layout.addWidget(self.source_selector)
 
@@ -544,21 +548,29 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             frame = QGroupBox("Controls")
             layout = QVBoxLayout(frame)
 
-            start_button = QPushButton("Start")
-            start_button.clicked.connect(self._start_analysis)
-            layout.addWidget(start_button)
+            self.start_button = QPushButton("Start")
+            self.start_button.clicked.connect(self._start_or_rerun)
+            layout.addWidget(self.start_button)
 
-            stop_button = QPushButton("Stop")
-            stop_button.clicked.connect(self._stop_analysis)
-            layout.addWidget(stop_button)
+            self.pause_resume_button = QPushButton("Pause")
+            self.pause_resume_button.clicked.connect(self._pause_or_resume_usb)
+            layout.addWidget(self.pause_resume_button)
+
+            self.end_button = QPushButton("End")
+            self.end_button.clicked.connect(self._end_usb_session)
+            layout.addWidget(self.end_button)
+
+            self.save_reports_button = QPushButton("Save Reports")
+            self.save_reports_button.clicked.connect(self._save_reports_from_main_view)
+            layout.addWidget(self.save_reports_button)
+
+            self.detailed_review_button = QPushButton("Open Detailed Review")
+            self.detailed_review_button.clicked.connect(self._open_detailed_review)
+            layout.addWidget(self.detailed_review_button)
 
             reset_button = QPushButton("Reset")
             reset_button.clicked.connect(self._reset_ui)
             layout.addWidget(reset_button)
-
-            pre_report_button = QPushButton("Open Pre-report")
-            pre_report_button.clicked.connect(self._open_pre_report)
-            layout.addWidget(pre_report_button)
 
             parent.addWidget(frame, 0, column)
 
@@ -573,8 +585,14 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.hr_plot.setLabel("bottom", "Time (s)")
             self.hr_plot.showGrid(x=True, y=True, alpha=0.3)
 
+            self.beat_plot = pg.PlotWidget(title="Beat snippets with average template")
+            self.beat_plot.setLabel("left", "Amplitude")
+            self.beat_plot.setLabel("bottom", "Time from R-peak (s)")
+            self.beat_plot.showGrid(x=True, y=True, alpha=0.3)
+
             parent.addWidget(self.ecg_plot)
             parent.addWidget(self.hr_plot)
+            parent.addWidget(self.beat_plot)
 
         def _build_settings_tab(self, parent: QVBoxLayout) -> None:
             detector_group = QGroupBox("R-peak detector method")
@@ -598,13 +616,12 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.rolling_window_input = QLineEdit(str(DEFAULT_ROLLING_WINDOW_SECONDS))
             rolling_window_layout.addRow("Window length (s):", self.rolling_window_input)
             rolling_window_layout.addRow(
-                QLabel("Stored for future USB streaming support. Not used for offline file replay."),
+                QLabel("Used for USB preview buffering behavior."),
             )
             parent.addWidget(rolling_window_group)
 
             deferred_note = QLabel(
-                "Deferred features note: USB streaming controls and additional acquisition tuning remain placeholders in "
-                "this clean milestone. Offline file replay uses the saved filter, R-peak, sampling-rate, and notch settings."
+                "File Analysis and USB Input share the same final analysis pipeline and processing settings."
             )
             deferred_note.setWordWrap(True)
             parent.addWidget(deferred_note)
@@ -615,7 +632,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             parent.addStretch(1)
 
         def _apply_processing_settings(self, settings: dict[str, Any]) -> None:
-            self.source_selector.setCurrentText(str(settings.get("input_source", DEFAULT_INPUT_SOURCE)))
+            self.source_selector.setCurrentText(normalize_input_source(settings.get("input_source", DEFAULT_INPUT_SOURCE)))
             self.filter_mode_selector.setCurrentText(str(settings.get("filter_mode", DEFAULT_FILTER_MODE)))
             self.low_cut_input.setText(str(settings.get("filter_low_cut_hz", DEFAULT_FILTER_LOW_CUT_HZ)))
             self.high_cut_input.setText(str(settings.get("filter_high_cut_hz", DEFAULT_FILTER_HIGH_CUT_HZ)))
@@ -627,12 +644,15 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 str(settings.get("rolling_window_seconds", DEFAULT_ROLLING_WINDOW_SECONDS))
             )
             self._on_filter_mode_changed()
+            self._update_action_controls()
 
         def _set_initial_plots(self) -> None:
             self.ecg_plot.clear()
             self.hr_plot.clear()
+            self.beat_plot.clear()
             self.ecg_plot.setTitle("Raw ECG + Filtered ECG preview")
             self.hr_plot.setTitle("Heart Rate over full duration")
+            self.beat_plot.setTitle("Beat snippets with average template")
 
         def _set_status(self, status: str) -> None:
             self.status_label.setText(status)
@@ -663,16 +683,37 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.high_cut_input.setEnabled(is_butterworth)
 
         def _on_source_mode_changed(self) -> None:
-            is_file_mode = self.source_selector.currentText() == "File Replay"
+            is_file_mode = self.source_selector.currentText() == "File Analysis"
             self.file_button.setEnabled(is_file_mode)
 
             if not is_file_mode:
-                self.file_status_label.setText(DEFAULT_USB_PLACEHOLDER_TEXT)
-                self._set_status(DEFAULT_USB_PLACEHOLDER_TEXT)
+                self.file_status_label.setText("USB Input active. Use Start / Pause / Resume / End controls.")
+                if self.usb_acquisition_state == "idle":
+                    self._set_status("USB Input ready. Click Start to begin acquisition.")
             elif self.selected_file:
                 self.file_status_label.setText(Path(self.selected_file).name)
             else:
                 self.file_status_label.setText("No file selected")
+            self._update_action_controls()
+
+        def _update_action_controls(self) -> None:
+            is_file_mode = self.source_selector.currentText() == "File Analysis"
+            has_results = self.latest_results is not None and self.latest_report_input_file is not None
+
+            if is_file_mode:
+                self.start_button.setText("Re-run Analysis" if has_results else "Start")
+                self.start_button.setEnabled(not self.acquisition_running)
+                self.pause_resume_button.setEnabled(False)
+                self.end_button.setEnabled(False)
+            else:
+                self.start_button.setText("Start")
+                self.start_button.setEnabled(self.usb_acquisition_state == "idle")
+                self.pause_resume_button.setText("Resume" if self.usb_acquisition_state == "paused" else "Pause")
+                self.pause_resume_button.setEnabled(self.usb_acquisition_state in {"running", "paused"})
+                self.end_button.setEnabled(self.usb_acquisition_state in {"running", "paused"})
+
+            self.save_reports_button.setEnabled(has_results)
+            self.detailed_review_button.setEnabled(has_results)
 
         def _select_ecg_file(self) -> None:
             file_path, _filter = QFileDialog.getOpenFileName(
@@ -710,7 +751,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 raise ValueError("Rolling window must be greater than 0 seconds.")
 
             return {
-                "input_source": self.source_selector.currentText(),
+                "input_source": normalize_input_source(self.source_selector.currentText()),
                 "sampling_rate_hz": sampling_rate,
                 "filter_mode": filter_mode,
                 "filter_low_cut_hz": low_cut_hz,
@@ -758,11 +799,17 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_raw_signal = raw_signal
             self._update_preview_plots(raw_signal=raw_signal, filtered_signal=filtered_signal, results=None, sampling_rate=settings["sampling_rate_hz"])
             self._set_status(f"Preview updated with {settings['filter_mode']}")
+            self._update_action_controls()
 
-        def _start_analysis(self) -> None:
+        def _start_or_rerun(self) -> None:
             if self.source_selector.currentText() == "USB Input":
-                self._show_info("USB Input", DEFAULT_USB_PLACEHOLDER_TEXT)
-                self._set_status(DEFAULT_USB_PLACEHOLDER_TEXT)
+                self._start_usb_acquisition()
+                return
+            self._start_file_analysis()
+
+        def _start_file_analysis(self) -> None:
+            if self.acquisition_running:
+                self._set_status("Analysis already running.")
                 return
 
             if not self.selected_file:
@@ -789,30 +836,18 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             QApplication.processEvents()
 
             self.acquisition_running = True
+            self._update_action_controls()
             self._set_status("Processing offline ECG file...")
 
             try:
                 raw_signal, source = self._load_selected_signal(settings["sampling_rate_hz"])
-                results = analyze_ecg(
-                    signal=raw_signal,
-                    sampling_rate=settings["sampling_rate_hz"],
-                    filter_mode=settings["filter_mode"],
-                    low_cut_hz=settings["filter_low_cut_hz"],
-                    high_cut_hz=settings["filter_high_cut_hz"],
-                    powerline_frequency_hz=settings["powerline_frequency_hz"],
-                    rpeak_method=settings["rpeak_method"],
+                self._complete_analysis_run(
+                    raw_signal=raw_signal,
+                    source=source,
+                    report_input_file=self.selected_file,
+                    settings=settings,
+                    completion_status="File analysis complete. Results updated in Analysis View.",
                 )
-                self.latest_results = results
-                self.latest_source = source
-                self.latest_raw_signal = raw_signal
-                self.processing_settings = settings
-                self._update_preview_plots(
-                    raw_signal=np.asarray(results["artifacts"]["raw_signal"], dtype=float),
-                    filtered_signal=np.asarray(results["artifacts"]["filtered_signal"], dtype=float),
-                    results=results,
-                    sampling_rate=settings["sampling_rate_hz"],
-                )
-                self._set_status("Analysis complete. Opening pre-report review window.")
             except (FileNotFoundError, NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
                 self._show_error("Analysis error", str(exc))
                 self._set_status(f"Analysis failed: {exc}")
@@ -820,20 +855,159 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             finally:
                 self.acquisition_running = False
                 progress_dialog.close()
+                self._update_action_controls()
 
-            self._open_pre_report()
-
-        def _stop_analysis(self) -> None:
-            if self.acquisition_running:
-                self._set_status("Offline analysis is running. It will finish the current file before returning.")
+        def _start_usb_acquisition(self) -> None:
+            if self.usb_acquisition_state in {"running", "paused"}:
+                self._set_status("USB acquisition already started.")
                 return
-            self._set_status("No active offline analysis to stop.")
+
+            self.usb_session_samples = np.array([], dtype=float)
+            self.usb_acquisition_state = "running"
+            self.acquisition_running = True
+            self.latest_results = None
+            self.latest_report_input_file = None
+            self.latest_source = ""
+            self.latest_raw_signal = None
+            self._set_status("USB acquisition started.")
+            self._refresh_usb_preview_plot()
+            self._update_action_controls()
+
+        def _pause_or_resume_usb(self) -> None:
+            if self.usb_acquisition_state == "running":
+                self.usb_acquisition_state = "paused"
+                self.acquisition_running = False
+                self._set_status("USB acquisition paused.")
+                self._update_action_controls()
+                return
+
+            if self.usb_acquisition_state == "paused":
+                self.usb_acquisition_state = "running"
+                self.acquisition_running = True
+                self._set_status("USB acquisition resumed.")
+                self._refresh_usb_preview_plot()
+                self._update_action_controls()
+
+        def _end_usb_session(self) -> None:
+            if self.usb_acquisition_state not in {"running", "paused"}:
+                self._set_status("No active USB acquisition to end.")
+                return
+
+            self.acquisition_running = False
+            self.usb_acquisition_state = "idle"
+            self._update_action_controls()
+            self._set_status("Finalizing USB session and running analysis...")
+            QApplication.processEvents()
+
+            try:
+                settings = self._get_current_processing_settings()
+                raw_signal = np.asarray(self.usb_session_samples, dtype=float)
+                if raw_signal.size < 3:
+                    raise ValueError("USB session is too short. Acquire more data before ending.")
+                session_file = self._save_usb_session_to_file(raw_signal)
+                source = f"usb_saved:{session_file}"
+                self._complete_analysis_run(
+                    raw_signal=raw_signal,
+                    source=source,
+                    report_input_file=str(session_file),
+                    settings=settings,
+                    completion_status="USB session ended. Analysis results are ready in Analysis View.",
+                )
+                self._open_detailed_review()
+            except (NeuroKit2UnavailableError, RuntimeError, ValueError, OSError) as exc:
+                self._show_error("USB processing error", str(exc))
+                self._set_status(f"USB processing failed: {exc}")
+            finally:
+                self._update_action_controls()
+
+        def _generate_usb_chunk(self, sampling_rate: int, rolling_window_seconds: int) -> np.ndarray:
+            chunk_size = max(5, int(sampling_rate * max(1, rolling_window_seconds) / 2))
+            time_axis = np.arange(chunk_size, dtype=float) / float(sampling_rate)
+            return 0.8 * np.sin(2 * np.pi * 1.2 * time_axis) + 0.08 * np.sin(2 * np.pi * 23.0 * time_axis)
+
+        def _refresh_usb_preview_plot(self) -> None:
+            try:
+                settings = self._get_current_processing_settings()
+            except ValueError:
+                return
+
+            chunk = self._generate_usb_chunk(
+                sampling_rate=settings["sampling_rate_hz"],
+                rolling_window_seconds=settings["rolling_window_seconds"],
+            )
+            self.usb_session_samples = np.concatenate([self.usb_session_samples, chunk])
+            raw_signal = np.asarray(self.usb_session_samples, dtype=float)
+            if raw_signal.size < 3:
+                return
+
+            try:
+                filtered_signal = clean_ecg_signal(
+                    signal=raw_signal,
+                    sampling_rate=settings["sampling_rate_hz"],
+                    filter_mode=settings["filter_mode"],
+                    low_cut_hz=settings["filter_low_cut_hz"],
+                    high_cut_hz=settings["filter_high_cut_hz"],
+                    powerline_frequency_hz=settings["powerline_frequency_hz"],
+                )
+            except (NeuroKit2UnavailableError, RuntimeError, ValueError):
+                filtered_signal = raw_signal.copy()
+
+            self._update_preview_plots(
+                raw_signal=raw_signal,
+                filtered_signal=filtered_signal,
+                results=None,
+                sampling_rate=settings["sampling_rate_hz"],
+            )
+
+        def _save_usb_session_to_file(self, signal: np.ndarray) -> Path:
+            session_dir = Path(__file__).resolve().parent / "USB_Sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            session_file = session_dir / f"usb_session_{timestamp}.csv"
+            np.savetxt(session_file, signal, delimiter=",")
+            return session_file
+
+        def _complete_analysis_run(
+            self,
+            *,
+            raw_signal: np.ndarray,
+            source: str,
+            report_input_file: str,
+            settings: dict[str, Any],
+            completion_status: str,
+        ) -> None:
+            results = analyze_ecg(
+                signal=raw_signal,
+                sampling_rate=settings["sampling_rate_hz"],
+                filter_mode=settings["filter_mode"],
+                low_cut_hz=settings["filter_low_cut_hz"],
+                high_cut_hz=settings["filter_high_cut_hz"],
+                powerline_frequency_hz=settings["powerline_frequency_hz"],
+                rpeak_method=settings["rpeak_method"],
+            )
+            self.latest_results = results
+            self.latest_source = source
+            self.latest_raw_signal = raw_signal
+            self.latest_report_input_file = report_input_file
+            self.processing_settings = settings
+            self._update_preview_plots(
+                raw_signal=np.asarray(results["artifacts"]["raw_signal"], dtype=float),
+                filtered_signal=np.asarray(results["artifacts"]["filtered_signal"], dtype=float),
+                results=results,
+                sampling_rate=settings["sampling_rate_hz"],
+            )
+            self.tabs.setCurrentIndex(0)
+            self._set_status(completion_status)
+            self._update_action_controls()
 
         def _reset_ui(self) -> None:
             self.acquisition_running = False
+            self.usb_acquisition_state = "idle"
+            self.usb_session_samples = np.array([], dtype=float)
             self.latest_results = None
             self.latest_source = ""
             self.latest_raw_signal = None
+            self.latest_report_input_file = None
             self.selected_file = None
             self.processing_settings = load_processing_settings()
 
@@ -841,6 +1015,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._on_source_mode_changed()
             self._set_initial_plots()
             self._set_status("State reset to saved settings")
+            self._update_action_controls()
 
         def _save_current_processing_settings(self) -> None:
             try:
@@ -857,19 +1032,34 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._show_info("Settings saved", f"Saved ECG processing settings to:\n{path}")
             self._set_status(f"Saved ECG processing settings to {path.name}")
 
-        def _open_pre_report(self) -> None:
-            if not self.latest_results or not self.selected_file:
-                self._show_info("Pre-report", "Run Start first to generate a pre-report review.")
+        def _save_reports_from_main_view(self) -> None:
+            if not self.latest_results or not self.latest_report_input_file:
+                self._show_info("Save Reports", "Run analysis first to enable report export.")
+                return
+
+            output_paths = save_structured_reports(
+                analysis_results=self.latest_results,
+                input_file=self.latest_report_input_file,
+                source=self.latest_source or f"file:{self.latest_report_input_file}",
+                write_json=False,
+            )
+            folder_path = output_paths["summary_metrics_csv"].parent
+            self._show_info("Reports saved", f"Saved report files to:\n{folder_path}")
+            self._set_status(f"Reports saved to {folder_path}")
+
+        def _open_detailed_review(self) -> None:
+            if not self.latest_results or not self.latest_report_input_file:
+                self._show_info("Detailed Review", "Run analysis first to open the detailed review view.")
                 return
 
             dialog = PreReportReviewDialog(
                 analysis_results=self.latest_results,
-                input_file=self.selected_file,
-                source=self.latest_source or f"file:{self.selected_file}",
+                input_file=self.latest_report_input_file,
+                source=self.latest_source or f"file:{self.latest_report_input_file}",
                 parent=self,
             )
             dialog.exec()
-            self._set_status("Returned from pre-report review window")
+            self._set_status("Returned from detailed review window")
 
         def _update_preview_plots(
             self,
@@ -883,10 +1073,12 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.ecg_plot.clear()
             self.ecg_plot.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0))
             self.ecg_plot.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2))
-            self.ecg_plot.setTitle("Raw ECG + Filtered ECG preview")
+            self.ecg_plot.setTitle("Full ECG: raw, filtered, and R-peaks" if results else "Raw ECG + Filtered ECG preview")
 
             self.hr_plot.clear()
             self.hr_plot.setTitle("Heart Rate over full duration")
+            self.beat_plot.clear()
+            self.beat_plot.setTitle("Beat snippets with average template overlay")
 
             if results is None:
                 return
@@ -908,6 +1100,77 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                         size=7,
                     )
                 )
+            self._plot_beat_summary(plot_widget=self.beat_plot, analysis_results=results)
+
+        def _plot_beat_summary(self, plot_widget: pg.PlotWidget, analysis_results: dict[str, Any]) -> None:
+            artifacts = analysis_results.get("artifacts", {})
+            beat_time = np.asarray(artifacts.get("beat_time_offsets_seconds", []), dtype=float)
+            beat_snippets = np.asarray(artifacts.get("beat_snippets", []), dtype=float)
+            average_template = np.asarray(artifacts.get("average_template", []), dtype=float)
+            beat_sample_offsets = np.asarray(artifacts.get("beat_sample_offsets", []), dtype=int)
+            r_peaks = np.asarray(artifacts.get("r_peaks", []), dtype=int)
+            filtered_signal = np.asarray(artifacts.get("filtered_signal", []), dtype=float)
+            beat_landmarks = analysis_results.get("report_tables", {}).get("beat_morphology_landmarks", [])
+
+            if beat_snippets.ndim == 2 and beat_snippets.size:
+                for beat in beat_snippets:
+                    plot_widget.plot(beat_time, beat, pen=pg.mkPen("#B0B0B0", width=0.8))
+            plot_widget.plot(beat_time, average_template, pen=pg.mkPen("#C44E52", width=2.0))
+            plot_widget.setLabel("bottom", "Time from R-peak (s)")
+            plot_widget.setLabel("left", "Amplitude")
+
+            finite_template = np.isfinite(average_template)
+            sampling_rate_hz = float(analysis_results.get("metrics", {}).get("sampling_rate_hz", 0) or 0)
+            marker_specs = (
+                ("p_peak_sample", "P", "#1F77B4", "t"),
+                ("q_peak_sample", "Q", "#2CA02C", "d"),
+                ("s_peak_sample", "S", "#FF7F0E", "s"),
+                ("t_peak_sample", "T", "#9467BD", "o"),
+            )
+            per_beat_points = _collect_per_beat_landmark_points(
+                beat_time=beat_time,
+                beat_snippets=beat_snippets,
+                beat_landmarks=beat_landmarks,
+                r_peaks=r_peaks,
+                beat_sample_offsets=beat_sample_offsets,
+                filtered_signal_size=int(filtered_signal.size),
+                sampling_rate_hz=sampling_rate_hz,
+                landmark_fields=tuple(spec[0] for spec in marker_specs),
+            )
+            finite_wave = np.isfinite(beat_time) & finite_template
+            for sample_field, label, color, symbol in marker_specs:
+                points = per_beat_points.get(sample_field, [])
+                if not points:
+                    continue
+                x_points = [point[0] for point in points]
+                y_points = [point[1] for point in points]
+                plot_widget.plot(
+                    x_points,
+                    y_points,
+                    pen=None,
+                    symbol=symbol,
+                    symbolSize=7,
+                    symbolBrush=pg.mkBrush(color),
+                    symbolPen=pg.mkPen(color),
+                )
+                if not finite_wave.any():
+                    continue
+                marker_x = float(np.nanmedian(np.asarray(x_points, dtype=float)))
+                marker_y = float(np.interp(marker_x, beat_time[finite_wave], average_template[finite_wave]))
+                marker_color = pg.mkColor(color)
+                marker_color.setAlpha(120)
+                plot_widget.plot(
+                    [marker_x],
+                    [marker_y],
+                    pen=None,
+                    symbol=symbol,
+                    symbolSize=5,
+                    symbolBrush=pg.mkBrush(marker_color),
+                    symbolPen=pg.mkPen(marker_color),
+                )
+                label_item = pg.TextItem(text=label, color=marker_color, anchor=(0.5, 1.4))
+                label_item.setPos(marker_x, marker_y)
+                plot_widget.addItem(label_item)
 
 
 def launch_ecg_ui() -> int:

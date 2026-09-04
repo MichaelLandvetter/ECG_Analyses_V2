@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from ecg_config import load_processing_settings, save_processing_settings
+from ecg_config import DEFAULT_INPUT_SOURCE, load_processing_settings, save_processing_settings
 from ecg_report import (
     AVERAGE_TEMPLATE_COLUMNS,
     BEAT_LANDMARK_COLUMNS,
@@ -53,6 +53,15 @@ class TestECGReportHelpers(unittest.TestCase):
         self.assertIn("sampling_rate_hz", loaded_settings)
         self.assertIn("filter_mode", loaded_settings)
         self.assertIn("rpeak_method", loaded_settings)
+
+    def test_load_processing_settings_maps_legacy_file_replay_to_file_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "ecg_settings.json"
+            settings_path.write_text('{"input_source":"File Replay"}', encoding="utf-8")
+
+            loaded_settings = load_processing_settings(settings_path=settings_path)
+
+        self.assertEqual(loaded_settings["input_source"], DEFAULT_INPUT_SOURCE)
 
     def test_create_report_run_directory_uses_reports_folder_and_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
