@@ -1,6 +1,6 @@
 # ECG_Analyses_V2
 
-Clean, ZIP-download-friendly Python ECG analysis app focused on **offline data-file replay** with a desktop review flow and structured CSV report export.
+Clean, ZIP-download-friendly Python ECG analysis app focused on **offline file analysis** and USB acquisition with structured CSV report export.
 
 ## Python recommendation
 
@@ -28,9 +28,9 @@ CLI pipeline:
 python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 ```
 
-## Offline file-analysis workflow
+## File Analysis workflow
 
-1. Launch the app and keep **File Replay** selected in Box 1.
+1. Launch the app and keep **File Analysis** selected in Box 1.
 2. Choose an ECG data file (`.txt`, `.csv`, or `.npy`).
 3. In **ECG Filter Settings**, select either:
    - `NeuroKit2 ecg_clean`
@@ -38,12 +38,23 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 4. Optionally adjust Butterworth low/high cut values and click **Apply Filter** to refresh the preview.
 5. In **R-peak Detection**, choose the detector method (`hamilton2002` default).
 6. Click **Start** to run the offline analysis. A processing dialog is shown while the full analysis is computed.
-7. When processing finishes, a **pre-report review window** opens with:
+7. Results are rendered directly in the main **Analysis View** with:
    - full ECG raw + filtered + R-peaks
    - full-duration heart-rate plot
    - beat snippets with average template overlay plus per-beat P/Q/S/T markers from NeuroKit2 delineation
-8. Use PyQtGraph pan/zoom in each review plot, and double-click any plot to open an enlarged navigable view.
-9. Click **Save Reports** to export CSV report files; after confirming the success dialog, the pre-report window closes and focus returns to the main analysis window. Use **Back to Analysis** to return without exporting.
+8. Use **Re-run Analysis** after the first run when processing settings are changed.
+9. Click **Save Reports** to export CSV report files.
+10. Optionally click **Open Detailed Review** to open the expanded review window.
+
+## USB Input workflow
+
+1. Select **USB Input** in Box 1.
+2. Click **Start** to begin acquisition (currently a simulated capture placeholder until hardware integration is added).
+3. Click **Pause** and **Resume** as needed during the same acquisition session.
+4. Click **End** to finalize the session and save the raw USB capture file.
+5. The app then runs the same offline analysis pipeline used by File Analysis and renders results in the main **Analysis View**.
+6. Optionally click **Open Detailed Review** for expanded review plots.
+7. Use **Save Reports** to export reports from the completed USB session analysis.
 
 ## ECG Processing Settings tab
 
@@ -52,7 +63,7 @@ The **ECG Processing Settings** tab stores runtime processing choices for later 
 - R-peak detector method
 - Sampling rate for offline analysis
 - Power-line notch frequency
-- Rolling window placeholder settings for future USB streaming
+- Rolling window settings used for USB preview buffering
 
 Built-in defaults live in `ecg_config.py` in the project root.
 
@@ -64,9 +75,11 @@ On startup the app loads `ecg_settings.json` if it is present and valid. If the 
 
 ## Report output location policy
 
-When **Save Reports** is used after file analysis:
+When **Save Reports** is used after File Analysis or USB End analysis:
 
-1. A `Reports/` folder is created next to the selected input file if it does not already exist.
+1. A `Reports/` folder is created next to the analysis input file if it does not already exist.
+   - File Analysis input file: user-selected ECG file
+   - USB session input file: generated capture under `<app_working_directory>/USB_Sessions/usb_session_<YYYYMMDD_HHMMSS_microseconds>.csv`
 2. A per-run folder is created inside `Reports/` using:
 
    ```text
@@ -82,10 +95,9 @@ When **Save Reports** is used after file analysis:
 
 A text summary report is also written in the same folder.
 
-## Current scope and deferred work
+## Current scope
 
-- **Implemented now:** offline file replay analysis, review window, settings save/load, CSV export.
-- **Deferred:** USB streaming. The UI keeps a clear placeholder message and does not crash when `USB Input` is selected.
+- **Implemented now:** File Analysis in the main Analysis View, USB acquisition session controls, shared NeuroKit2 analysis pipeline, settings save/load, CSV export.
 
 ## Project structure
 
@@ -94,7 +106,7 @@ A text summary report is also written in the same folder.
 - `ecg_analysis.py` - NeuroKit2-centered filtering, R-peak detection, analysis outputs
 - `ecg_report.py` - structured CSV export and report folder creation
 - `ecg_config.py` - defaults and JSON-backed processing settings helpers
-- `ecg_ui.py` - PyQt6 desktop workflow and pre-report review window
+- `ecg_ui.py` - PyQt6 desktop workflow, mode-specific controls, and detailed review window
 - `tests/` - lightweight unit tests for core contracts
 
 ## Tests
