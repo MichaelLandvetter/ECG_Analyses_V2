@@ -18,6 +18,27 @@ import serial
 from serial import SerialException
 from serial.tools import list_ports
 
+from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
+
 from ecg_analysis import (
     apply_butterworth_bandpass,
     apply_powerline_notch,
@@ -27,29 +48,8 @@ from ecg_analysis import (
 )
 from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line
 
-try:
-    from PyQt5.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
-    from PyQt5.QtWidgets import (
-        QApplication,
-        QCheckBox,
-        QComboBox,
-        QDoubleSpinBox,
-        QFileDialog,
-        QFormLayout,
-        QGridLayout,
-        QGroupBox,
-        QHBoxLayout,
-        QLabel,
-        QMainWindow,
-        QMessageBox,
-        QPushButton,
-        QSpinBox,
-        QStatusBar,
-        QVBoxLayout,
-        QWidget,
-    )
+QT_BINDING = "PyQt6"
 
-    QT_BINDING = "PyQt5"
 except ImportError:
     from PySide6.QtCore import QThread, QTimer, Qt, Signal
     from PySide6.QtWidgets import (
