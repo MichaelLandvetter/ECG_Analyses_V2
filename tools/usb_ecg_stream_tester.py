@@ -5,10 +5,12 @@ from __future__ import annotations
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pyqtgraph as pg
@@ -31,6 +33,7 @@ try:
         QApplication,
         QCheckBox,
         QComboBox,
+        QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
         QGridLayout,
@@ -53,6 +56,7 @@ except ImportError:
         QApplication,
         QCheckBox,
         QComboBox,
+        QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
         QGroupBox,
@@ -78,14 +82,6 @@ PLOT_REFRESH_MS = 40
 FILTER_NONE = "None"
 FILTER_BUTTERWORTH = "Butterworth bandpass"
 BAUD_OPTIONS = ["115200", "230400", "460800", "921600"]
-
-
-@dataclass
-class PendingBatch:
-    """Pending samples awaiting timer-based UI processing."""
-
-    samples: list[StreamSample]
-    host_times: list[float]
 
 
 class SerialReaderThread(QThread):
@@ -239,11 +235,15 @@ class USBECGStreamTesterWindow(QMainWindow):
         filter_layout = QFormLayout(filter_group)
         self.filter_combo = QComboBox()
         self.filter_combo.addItems([FILTER_NONE, FILTER_BUTTERWORTH])
-        self.low_cut_spin = QSpinBox()
-        self.low_cut_spin.setRange(1, 100)
-        self.low_cut_spin.setValue(5)
-        self.high_cut_spin = QSpinBox()
-        self.high_cut_spin.setRange(5, 200)
+        self.low_cut_spin = QDoubleSpinBox()
+        self.low_cut_spin.setDecimals(1)
+        self.low_cut_spin.setRange(0.1, 100.0)
+        self.low_cut_spin.setSingleStep(0.1)
+        self.low_cut_spin.setValue(0.5)
+        self.high_cut_spin = QDoubleSpinBox()
+        self.high_cut_spin.setDecimals(1)
+        self.high_cut_spin.setRange(1.0, 200.0)
+        self.high_cut_spin.setSingleStep(0.5)
         self.high_cut_spin.setValue(40)
         self.notch_checkbox = QCheckBox("Enable 50 Hz notch")
         self.notch_checkbox.setChecked(True)
@@ -581,7 +581,7 @@ class USBECGStreamTesterWindow(QMainWindow):
         self.low_cut_spin.setEnabled(butterworth_enabled)
         self.high_cut_spin.setEnabled(butterworth_enabled)
         self.notch_checkbox.setEnabled(butterworth_enabled)
-        max_high_cut = max(5, (self.sample_rate_spin.value() // 2) - 1)
+        max_high_cut = max(1.0, (self.sample_rate_spin.value() / 2.0) - 1.0)
         self.high_cut_spin.setMaximum(max_high_cut)
         if self.high_cut_spin.value() > max_high_cut:
             self.high_cut_spin.setValue(max_high_cut)
