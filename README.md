@@ -58,29 +58,36 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 
 ## USB Stream Tester
 
-This repository also includes a standalone pre-integration USB ECG stream tester for an ESP32-S3 board streaming raw analog ECG over USB serial.
+This repository also includes an ESP32-S3 firmware sketch and a standalone USB ECG stream tester. The firmware reads the ECG signal through an ADS1115 external ADC and streams raw samples over USB serial.
 
 ### Wiring assumptions
 
-- SparkFun analog ECG board analog output -> **GPIO2 / ADC1** on the Raspberry Baguette S3 (ESP32-S3)
-- ECG board ground -> ESP32-S3 ground
+- ECG board analog output -> **ADS1115 A1**
+- ADS1115 SDA/SCL -> Raspberry Baguette S3 STEMMA QT SDA/SCL (**GPIO47/GPIO48**)
+- ECG board, ADS1115, and Baguette S3 grounds connected together
+- AD8232 leads-off outputs LO- / LO+ -> **GPIO3 / GPIO4**, respectively
 - ECG board power -> board-appropriate supply rail
 
 ### Firmware upload
 
-1. Open `/home/runner/work/ECG_Analyses_V2/ECG_Analyses_V2/firmware/esp32s3_ecg_stream/esp32s3_ecg_stream.ino` in the Arduino IDE.
-2. Select your ESP32-S3 board and USB CDC-capable port.
-3. Confirm the sketch constants near the top:
+1. Install the **Adafruit ADS1X15** library in the Arduino IDE Library Manager.
+2. Open `firmware/esp32s3_ecg_stream/esp32s3_ecg_stream.ino`.
+3. Select your ESP32-S3 board and USB CDC-capable port.
+4. Confirm the sketch constants near the top:
    - sample rate: `250`
-   - ADC pin: `GPIO2`
+   - ADS1115 address: `0x48`
+   - ADS1115 channel: `A1`
+   - I2C pins: SDA `GPIO47`, SCL `GPIO48`
    - baud rate: `230400`
-4. Upload the sketch.
-5. Open a serial monitor or the tester below and confirm lines appear in this format:
+5. Upload the sketch.
+6. Open a serial monitor or the tester below and confirm lines appear in this format:
 
    ```text
    timestamp_ms,sample_index,raw_ecg
-   1234,567,2048
+   1234,567,16384
    ```
+
+The ADS1115 is configured for single-ended A1 readings at 250 samples/second and gain `GAIN_ONE`. If either AD8232 leads-off input is high, the firmware streams `0` for that sample. The CSV format is unchanged, so the Python tester needs no ADS1115-specific parser changes.
 
 ### Run the standalone tester
 
