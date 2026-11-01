@@ -2,35 +2,58 @@
   ESP32-S3 USB ECG stream test sketch
 
   Wiring:
-  - SparkFun analog ECG OUT -> ESP32-S3 GPIO2 (ADC1)
-  - ECG board GND -> ESP32-S3 GND
-  - ECG board VCC -> board-appropriate supply
+  - ECG board analog OUT -> ADS1115 A1
+  - ADS1115 SDA/SCL -> Baguette S3 STEMMA QT SDA/SCL (GPIO47/GPIO48)
+  - ECG board, ADS1115, and Baguette S3 grounds connected together
+  - AD8232 LO- -> GPIO3; LO+ -> GPIO4
 
   USB serial output format:
   timestamp_ms,sample_index,raw_ecg
   Example:
-  1234,567,2048
+  1234,567,16384
 */
 
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+
 static constexpr uint32_t SAMPLE_RATE_HZ = 250;
-static constexpr int ADC_PIN = 2;               // GPIO2 / ADC1
+static constexpr int I2C_SDA_PIN = 47;
+static constexpr int I2C_SCL_PIN = 48;
+static constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
+static constexpr uint8_t ADS1115_ECG_CHANNEL = 1;
+static constexpr int AD8232_LO_MINUS_PIN = 3;
+static constexpr int AD8232_LO_PLUS_PIN = 4;
 static constexpr uint32_t BAUD_RATE = 230400;   // Stable default for CSV streaming
-static constexpr uint32_t ADC_RESOLUTION_BITS = 12;
 
 static constexpr uint32_t SAMPLE_PERIOD_US = 1000000UL / SAMPLE_RATE_HZ;
 
+Adafruit_ADS1115 ads;
 uint32_t sampleIndex = 0;
 uint32_t nextSampleDeadlineUs = 0;
 
 void setup() {
   Serial.begin(BAUD_RATE);
-  analogReadResolution(ADC_RESOLUTION_BITS);
-  pinMode(ADC_PIN, INPUT);
 
   const uint32_t serialWaitStartMs = millis();
   while (!Serial && (millis() - serialWaitStartMs) < 2000UL) {
     delay(10);
   }
+
+  pinMode(AD8232_LO_MINUS_PIN, INPUT);
+  pinMode(AD8232_LO_PLUS_PIN, INPUT);
+
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(400000);
+
+  if (!ads.begin(ADS1115_I2C_ADDRESS, &Wire)) {
+    Serial.println("Failed to initialize ADS1115 at I2C address 0x48");
+    while (true) {
+      delay(10);
+    }
+  }
+
+  ads.setGain(GAIN_ONE);
+  ads.setDataRate(RATE_ADS1115_250SPS);
 
   nextSampleDeadlineUs = micros();
 }
@@ -48,7 +71,10 @@ void loop() {
   }
 
   const uint32_t timestampMs = millis();
-  const int rawEcg = analogRead(ADC_PIN);
+  const bool leadsOff =
+    digitalRead(AD8232_LO_MINUS_PIN) == HIGH ||
+    digitalRead(AD8232_LO_PLUS_PIN) == HIGH;
+  const int16_t rawEcg = leadsOff ? 0 : ads.readADC_SingleEnded(ADS1115_ECG_CHANNEL);
 
   char lineBuffer[48];
   const int bytesWritten = snprintf(
@@ -57,7 +83,7 @@ void loop() {
     "%lu,%lu,%d\n",
     static_cast<unsigned long>(timestampMs),
     static_cast<unsigned long>(sampleIndex),
-    rawEcg
+    static_cast<int>(rawEcg)
   );
 
   if (bytesWritten > 0) {

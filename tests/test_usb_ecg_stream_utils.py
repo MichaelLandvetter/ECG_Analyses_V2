@@ -16,6 +16,10 @@ class TestUSBECGStreamUtils(unittest.TestCase):
         self.assertEqual(sample.sample_index, 56)
         self.assertEqual(sample.raw_ecg, 2048)
 
+    def test_parse_stream_line_accepts_ads1115_positive_full_scale(self) -> None:
+        sample = parse_stream_line("1234,57,32767")
+        self.assertEqual(sample.raw_ecg, 32767)
+
     def test_parse_stream_line_rejects_invalid_shape(self) -> None:
         with self.assertRaises(ValueError):
             parse_stream_line("1234,56")
