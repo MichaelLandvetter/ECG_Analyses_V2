@@ -18,37 +18,29 @@ import serial
 from serial import SerialException
 from serial.tools import list_ports
 
-from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
-from PyQt6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
-    QFileDialog,
-    QFormLayout,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QSpinBox,
-    QStatusBar,
-    QVBoxLayout,
-    QWidget,
-)
+try:
+    from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
+    from PyQt6.QtWidgets import (
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QDoubleSpinBox,
+        QFileDialog,
+        QFormLayout,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QMainWindow,
+        QMessageBox,
+        QPushButton,
+        QSpinBox,
+        QStatusBar,
+        QVBoxLayout,
+        QWidget,
+    )
 
-from ecg_analysis import (
-    apply_butterworth_bandpass,
-    apply_powerline_notch,
-    estimate_live_heart_rate_trace,
-    validate_filter_settings,
-    validate_powerline_frequency,
-)
-from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line
-
-QT_BINDING = "PyQt6"
+    QT_BINDING = "PyQt6"
 
 except ImportError:
     from PySide6.QtCore import QThread, QTimer, Qt, Signal
@@ -73,6 +65,15 @@ except ImportError:
     )
 
     QT_BINDING = "PySide6"
+
+from ecg_analysis import (
+    apply_butterworth_bandpass,
+    apply_powerline_notch,
+    estimate_live_heart_rate_trace,
+    validate_filter_settings,
+    validate_powerline_frequency,
+)
+from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line
 
 DEFAULT_SAMPLE_RATE_HZ = 250
 DEFAULT_BAUD_RATE = 230400
