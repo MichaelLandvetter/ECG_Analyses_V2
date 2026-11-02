@@ -559,7 +559,9 @@ class USBECGStreamTesterWindow(QMainWindow):
         self.hr_curve.setData(times[: hr.size], hr)
 
     def _update_metrics_labels(self) -> None:
-        self.live_rate_label.setText(f"{self.diagnostics.incoming_rate_hz:.1f} Hz")
+        self.live_rate_label.setText(
+            f"device {self.diagnostics.device_rate_hz:.1f} Hz | host {self.diagnostics.incoming_rate_hz:.1f} Hz"
+        )
         self.total_samples_label.setText(str(self.diagnostics.total_samples))
         self.dropped_samples_label.setText(str(self.diagnostics.dropped_samples))
         self.parse_errors_label.setText(str(self.diagnostics.parse_errors))

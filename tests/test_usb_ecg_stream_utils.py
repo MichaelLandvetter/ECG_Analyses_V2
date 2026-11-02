@@ -43,6 +43,7 @@ class TestUSBECGStreamUtils(unittest.TestCase):
         self.assertEqual(diagnostics.total_samples, 3)
         self.assertEqual(diagnostics.dropped_samples, 2)
         self.assertGreater(diagnostics.incoming_rate_hz, 0.0)
+        self.assertAlmostEqual(diagnostics.device_rate_hz, 2 * 1000.0 / 12.0)
         self.assertIsNotNone(diagnostics.interval_stats)
 
 
