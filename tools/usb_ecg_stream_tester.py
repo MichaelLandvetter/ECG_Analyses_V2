@@ -73,7 +73,7 @@ from ecg_analysis import (
     validate_filter_settings,
     validate_powerline_frequency,
 )
-from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line
+from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line, split_serial_lines
 
 DEFAULT_SAMPLE_RATE_HZ = 250
 DEFAULT_BAUD_RATE = 230400
@@ -108,30 +108,37 @@ class SerialReaderThread(QThread):
             return
 
         try:
+            pending = b""
             while not self.isInterruptionRequested():
                 try:
-                    raw_line = self._serial.readline()
+                    chunk = self._serial.read(max(1, self._serial.in_waiting))
                 except SerialException as exc:
                     self.serial_error.emit(f"Serial read error: {exc}")
                     return
 
-                if not raw_line:
+                if not chunk:
                     continue
 
                 host_time = time.monotonic()
-                try:
-                    decoded = raw_line.decode("utf-8").strip()
-                except UnicodeDecodeError:
-                    self.parse_error.emit("Received undecodable serial bytes")
-                    continue
+                lines, pending = split_serial_lines(pending, chunk)
+                if len(pending) > 4096:
+                    pending = b""
+                for raw_line in lines:
+                    try:
+                        decoded = raw_line.decode("utf-8").strip()
+                    except UnicodeDecodeError:
+                        self.parse_error.emit("Received undecodable serial bytes")
+                        continue
+                    if not decoded:
+                        continue
 
-                try:
-                    sample = parse_stream_line(decoded)
-                except ValueError as exc:
-                    self.parse_error.emit(str(exc))
-                    continue
+                    try:
+                        sample = parse_stream_line(decoded)
+                    except ValueError as exc:
+                        self.parse_error.emit(str(exc))
+                        continue
 
-                self.sample_received.emit(sample, host_time)
+                    self.sample_received.emit(sample, host_time)
         finally:
             if self._serial is not None:
                 try:
