@@ -84,6 +84,7 @@ class StreamDiagnostics:
         self._last_timestamp_ms: int | None = None
         self._recent_host_times: Deque[float] = deque(maxlen=max(2, int(math.ceil(self.sample_rate_hz * history_seconds))))
         self._recent_intervals_ms: Deque[float] = deque(maxlen=interval_history)
+        self._recent_device_times_ms: Deque[int] = deque(maxlen=self._recent_host_times.maxlen)
 
     def reset(self) -> None:
         """Reset all counters and histories."""
@@ -94,6 +95,7 @@ class StreamDiagnostics:
         self._last_timestamp_ms = None
         self._recent_host_times.clear()
         self._recent_intervals_ms.clear()
+        self._recent_device_times_ms.clear()
 
     def reset_gap_reference(self) -> None:
         """Drop gap/timestamp continuity when pausing or restarting capture."""
@@ -101,6 +103,7 @@ class StreamDiagnostics:
         self._last_timestamp_ms = None
         self._recent_host_times.clear()
         self._recent_intervals_ms.clear()
+        self._recent_device_times_ms.clear()
 
     def note_parse_error(self) -> None:
         """Increment parse error counter."""
@@ -119,6 +122,7 @@ class StreamDiagnostics:
         self._last_sample_index = sample.sample_index
         self._last_timestamp_ms = sample.timestamp_ms
         self._recent_host_times.append(float(host_time))
+        self._recent_device_times_ms.append(sample.timestamp_ms)
 
     @property
     def incoming_rate_hz(self) -> float:
@@ -129,6 +133,16 @@ class StreamDiagnostics:
         if elapsed <= 0.0:
             return 0.0
         return (len(self._recent_host_times) - 1) / elapsed
+
+    @property
+    def device_rate_hz(self) -> float:
+        """Estimate sample rate from device timestamps."""
+        if len(self._recent_device_times_ms) < 2:
+            return 0.0
+        elapsed_ms = self._recent_device_times_ms[-1] - self._recent_device_times_ms[0]
+        if elapsed_ms <= 0:
+            return 0.0
+        return (len(self._recent_device_times_ms) - 1) * 1000.0 / elapsed_ms
 
     @property
     def interval_stats(self) -> IntervalStats | None:

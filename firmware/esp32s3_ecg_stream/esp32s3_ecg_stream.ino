@@ -53,7 +53,7 @@ void setup() {
   }
 
   ads.setGain(GAIN_ONE);
-  ads.setDataRate(RATE_ADS1115_250SPS);
+  ads.setDataRate(RATE_ADS1115_860SPS);
 
   nextSampleDeadlineUs = micros();
 }

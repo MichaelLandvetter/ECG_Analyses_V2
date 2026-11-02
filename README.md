@@ -87,7 +87,7 @@ This repository also includes an ESP32-S3 firmware sketch and a standalone USB E
    1234,567,16384
    ```
 
-The ADS1115 is configured for single-ended A1 readings at 250 samples/second and gain `GAIN_ONE`. If either AD8232 leads-off input is high, the firmware streams `0` for that sample. The CSV format is unchanged, so the Python tester needs no ADS1115-specific parser changes.
+The ADS1115 is configured for single-ended A1 readings at 860 SPS conversion rate (single-shot reads need well under 4 ms to sustain the 250 Hz stream) and gain `GAIN_ONE`. If either AD8232 leads-off input is high, the firmware streams `0` for that sample. The CSV format is unchanged, so the Python tester needs no ADS1115-specific parser changes.
 
 ### Run the standalone tester
 
