@@ -57,6 +57,20 @@ class TestECGScaffold(unittest.TestCase):
         self.assertEqual(trace.size, 2)
         self.assertTrue(np.isnan(trace).all())
 
+    def test_estimate_live_heart_rate_trace_ignores_t_waves(self) -> None:
+        sampling_rate = 250
+        time_axis = np.arange(0, 10 * sampling_rate) / sampling_rate
+        signal = np.zeros_like(time_axis)
+        for beat_time in np.arange(0.5, 10.0, 1.0):
+            signal += 5000.0 * np.exp(-(((time_axis - beat_time) / 0.01) ** 2) / 2)
+            signal += 1500.0 * np.exp(-(((time_axis - beat_time - 0.3) / 0.05) ** 2) / 2)
+
+        trace = estimate_live_heart_rate_trace(signal=signal, sampling_rate=sampling_rate)
+
+        self.assertTrue(np.all(np.isfinite(trace)))
+        self.assertGreaterEqual(float(np.min(trace)), 58.0)
+        self.assertLessEqual(float(np.max(trace)), 62.0)
+
     def test_estimate_live_heart_rate_trace_returns_finite_values_for_periodic_peaks(self) -> None:
         signal = np.zeros(1000, dtype=float)
         signal[100] = 1.0

@@ -209,14 +209,16 @@ def estimate_live_heart_rate_trace(
     try:
         from scipy.signal import find_peaks
 
-        minimum_distance = max(1, int(0.3 * sampling_rate))
-        prominence = max(0.05, float(np.nanstd(signal_array)) * 0.5)
+        minimum_distance = max(1, int(0.4 * sampling_rate))
+        baseline = float(np.nanmedian(signal_array))
+        r_amplitude = float(np.nanpercentile(signal_array, 99.5)) - baseline
+        prominence = max(0.05, 0.5 * r_amplitude, float(np.nanstd(signal_array)) * 0.5)
         peaks, _properties = find_peaks(signal_array, distance=minimum_distance, prominence=prominence)
     except Exception:
         candidate = np.where(
             (signal_array[1:-1] > signal_array[:-2]) & (signal_array[1:-1] >= signal_array[2:]),
         )[0] + 1
-        minimum_distance = max(1, int(0.3 * sampling_rate))
+        minimum_distance = max(1, int(0.4 * sampling_rate))
         if not candidate.size:
             peaks = np.array([], dtype=int)
         else:
@@ -245,13 +247,17 @@ def estimate_live_heart_rate_trace(
     hr_trace = np.full(signal_array.size, np.nan, dtype=float)
     first_valid_bpm: float | None = None
     last_valid_bpm: float | None = None
+    recent_bpm: list[float] = []
     for left_peak, right_peak in zip(peaks[:-1], peaks[1:]):
         rr_samples = right_peak - left_peak
         if rr_samples <= 0:
             continue
-        bpm = 60.0 * float(sampling_rate) / float(rr_samples)
-        if not np.isfinite(bpm):
+        beat_bpm = 60.0 * float(sampling_rate) / float(rr_samples)
+        if not np.isfinite(beat_bpm) or not 30.0 <= beat_bpm <= 220.0:
             continue
+        # Median over the last few beats suppresses single missed or extra detections.
+        recent_bpm = (recent_bpm + [beat_bpm])[-5:]
+        bpm = float(np.median(recent_bpm))
         if first_valid_bpm is None:
             first_valid_bpm = bpm
         last_valid_bpm = bpm
