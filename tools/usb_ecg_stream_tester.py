@@ -73,7 +73,7 @@ from ecg_analysis import (
     validate_filter_settings,
     validate_powerline_frequency,
 )
-from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line
+from tools.usb_ecg_stream_utils import StreamDiagnostics, StreamSample, parse_stream_line, split_serial_lines
 
 DEFAULT_SAMPLE_RATE_HZ = 250
 DEFAULT_BAUD_RATE = 230400
@@ -108,30 +108,37 @@ class SerialReaderThread(QThread):
             return
 
         try:
+            pending = b""
             while not self.isInterruptionRequested():
                 try:
-                    raw_line = self._serial.readline()
+                    chunk = self._serial.read(max(1, self._serial.in_waiting))
                 except SerialException as exc:
                     self.serial_error.emit(f"Serial read error: {exc}")
                     return
 
-                if not raw_line:
+                if not chunk:
                     continue
 
                 host_time = time.monotonic()
-                try:
-                    decoded = raw_line.decode("utf-8").strip()
-                except UnicodeDecodeError:
-                    self.parse_error.emit("Received undecodable serial bytes")
-                    continue
+                lines, pending = split_serial_lines(pending, chunk)
+                if len(pending) > 4096:
+                    pending = b""
+                for raw_line in lines:
+                    try:
+                        decoded = raw_line.decode("utf-8").strip()
+                    except UnicodeDecodeError:
+                        self.parse_error.emit("Received undecodable serial bytes")
+                        continue
+                    if not decoded:
+                        continue
 
-                try:
-                    sample = parse_stream_line(decoded)
-                except ValueError as exc:
-                    self.parse_error.emit(str(exc))
-                    continue
+                    try:
+                        sample = parse_stream_line(decoded)
+                    except ValueError as exc:
+                        self.parse_error.emit(str(exc))
+                        continue
 
-                self.sample_received.emit(sample, host_time)
+                    self.sample_received.emit(sample, host_time)
         finally:
             if self._serial is not None:
                 try:
@@ -164,6 +171,9 @@ class USBECGStreamTesterWindow(QMainWindow):
         self.capture_state = "stopped"
         self.pending_samples: deque[tuple[StreamSample, float]] = deque()
         self.diagnostics = StreamDiagnostics(sample_rate_hz=DEFAULT_SAMPLE_RATE_HZ)
+        self.capture_wall_start: float | None = None
+        self.capture_first_device_ms: int | None = None
+        self.latest_device_ms: int | None = None
         self.record_path: Path | None = None
         self.record_file = None
 
@@ -260,11 +270,13 @@ class USBECGStreamTesterWindow(QMainWindow):
         self.dropped_samples_label = QLabel("0")
         self.interval_stats_label = QLabel("n/a")
         self.parse_errors_label = QLabel("0")
+        self.lag_label = QLabel("n/a")
         telemetry_layout.addRow("Incoming sample rate", self.live_rate_label)
         telemetry_layout.addRow("Total samples received", self.total_samples_label)
         telemetry_layout.addRow("Dropped samples estimate", self.dropped_samples_label)
         telemetry_layout.addRow("Timestamp jitter / intervals", self.interval_stats_label)
         telemetry_layout.addRow("Serial parse errors", self.parse_errors_label)
+        telemetry_layout.addRow("Display lag behind device", self.lag_label)
 
         controls_layout.addWidget(serial_group, 0, 0)
         controls_layout.addWidget(acquisition_group, 0, 1)
@@ -395,6 +407,9 @@ class USBECGStreamTesterWindow(QMainWindow):
         self._set_buffer_capacity()
         self._open_record_file_if_needed()
         self.capture_state = "running"
+        self.capture_wall_start = time.monotonic()
+        self.capture_first_device_ms = None
+        self.latest_device_ms = None
         self._refresh_capture_controls()
         self._update_metrics_labels()
         self._update_plots()
@@ -494,6 +509,9 @@ class USBECGStreamTesterWindow(QMainWindow):
 
         for sample, host_time in zip(batch_samples, batch_host_times):
             self.diagnostics.observe_sample(sample, host_time)
+            if self.capture_first_device_ms is None:
+                self.capture_first_device_ms = sample.timestamp_ms
+            self.latest_device_ms = sample.timestamp_ms
             self.time_seconds.append(sample.timestamp_ms / 1000.0)
             self.raw_samples.append(float(sample.raw_ecg))
             if self.record_file is not None:
@@ -563,6 +581,16 @@ class USBECGStreamTesterWindow(QMainWindow):
             f"device {self.diagnostics.device_rate_hz:.1f} Hz | host {self.diagnostics.incoming_rate_hz:.1f} Hz"
         )
         self.total_samples_label.setText(str(self.diagnostics.total_samples))
+        if (
+            self.capture_state == "running"
+            and self.capture_wall_start is not None
+            and self.capture_first_device_ms is not None
+            and self.latest_device_ms is not None
+        ):
+            wall_s = time.monotonic() - self.capture_wall_start
+            device_s = (self.latest_device_ms - self.capture_first_device_ms) / 1000.0
+            average_hz = self.diagnostics.total_samples / wall_s if wall_s > 0 else 0.0
+            self.lag_label.setText(f"{wall_s - device_s:.2f} s (average {average_hz:.1f} Hz since Start)")
         self.dropped_samples_label.setText(str(self.diagnostics.dropped_samples))
         self.parse_errors_label.setText(str(self.diagnostics.parse_errors))
         interval_stats = self.diagnostics.interval_stats
@@ -621,7 +649,7 @@ class USBECGStreamTesterWindow(QMainWindow):
 
 def main() -> int:
     """Launch the standalone tester."""
-    pg.setConfigOptions(antialias=True)
+    pg.setConfigOptions(antialias=False)
     app = QApplication(sys.argv)
     window = USBECGStreamTesterWindow()
     window.show()

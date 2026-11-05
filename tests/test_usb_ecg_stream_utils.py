@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from tools.usb_ecg_stream_utils import StreamDiagnostics, estimate_dropped_samples, parse_stream_line
+from tools.usb_ecg_stream_utils import StreamDiagnostics, estimate_dropped_samples, parse_stream_line, split_serial_lines
 
 
 class TestUSBECGStreamUtils(unittest.TestCase):
@@ -27,6 +27,11 @@ class TestUSBECGStreamUtils(unittest.TestCase):
     def test_parse_stream_line_rejects_non_integer_fields(self) -> None:
         with self.assertRaises(ValueError):
             parse_stream_line("1234,abc,2048")
+
+    def test_split_serial_lines_keeps_partial_line(self) -> None:
+        lines, rest = split_serial_lines(b"1,2,", b"3\n4,5,6\n7,8")
+        self.assertEqual(lines, [b"1,2,3", b"4,5,6"])
+        self.assertEqual(rest, b"7,8")
 
     def test_estimate_dropped_samples_detects_gap(self) -> None:
         self.assertEqual(estimate_dropped_samples(100, 104), 3)

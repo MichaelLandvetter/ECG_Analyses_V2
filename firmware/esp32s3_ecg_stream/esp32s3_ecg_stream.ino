@@ -33,6 +33,7 @@ uint32_t nextSampleDeadlineUs = 0;
 
 void setup() {
   Serial.begin(BAUD_RATE);
+  Serial.setTxTimeoutMs(0);  // never block the sampling loop when the PC is slow to read
 
   const uint32_t serialWaitStartMs = millis();
   while (!Serial && (millis() - serialWaitStartMs) < 2000UL) {
@@ -86,7 +87,8 @@ void loop() {
     static_cast<int>(rawEcg)
   );
 
-  if (bytesWritten > 0) {
+  // Skip the line if USB is backed up; the gap shows up as dropped samples on the PC.
+  if (bytesWritten > 0 && Serial.availableForWrite() >= bytesWritten) {
     Serial.write(reinterpret_cast<const uint8_t*>(lineBuffer), static_cast<size_t>(bytesWritten));
   }
 

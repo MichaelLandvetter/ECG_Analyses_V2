@@ -54,6 +54,12 @@ def parse_stream_line(line: str) -> StreamSample:
     return StreamSample(timestamp_ms=timestamp_ms, sample_index=sample_index % UINT32_MODULUS, raw_ecg=raw_ecg)
 
 
+def split_serial_lines(buffer: bytes, chunk: bytes) -> tuple[list[bytes], bytes]:
+    """Append a raw serial chunk to the buffer and return complete lines plus the unfinished remainder."""
+    parts = (buffer + chunk).split(b"\n")
+    return parts[:-1], parts[-1]
+
+
 def estimate_dropped_samples(previous_index: int | None, current_index: int) -> int:
     """Estimate dropped samples from `sample_index` gaps with uint32 rollover support."""
     if previous_index is None:
