@@ -297,6 +297,8 @@ class USBECGStreamTesterWindow(QMainWindow):
         self.raw_curve = self.raw_plot.plot(pen=pg.mkPen("#00bcd4", width=1.5))
         self.filtered_curve = self.filtered_plot.plot(pen=pg.mkPen("#4caf50", width=1.5))
         self.hr_curve = self.hr_plot.plot(pen=pg.mkPen("#ff9800", width=2))
+        self.hr_plot.enableAutoRange(axis="y", enable=False)
+        self.hr_plot.setYRange(30, 180, padding=0)
 
         main_layout.addWidget(self.raw_plot, stretch=2)
         main_layout.addWidget(self.filtered_plot, stretch=2)
