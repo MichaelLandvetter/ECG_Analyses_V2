@@ -31,6 +31,31 @@ Adafruit_ADS1115 ads;
 uint32_t sampleIndex = 0;
 uint32_t nextSampleDeadlineUs = 0;
 
+void handleIdentification() {
+  static char command[32];
+  static size_t length = 0;
+  static bool overflow = false;
+  while (Serial.available() > 0) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\n') {
+      command[length] = '\0';
+      static constexpr char response[] = "VER_VA,1,ESP32S3,ADS1115,250\n";
+      if (!overflow && strcmp(command, "VER_VA_IDENTIFY") == 0 &&
+          Serial.availableForWrite() >= static_cast<int>(sizeof(response) - 1)) {
+        Serial.write(reinterpret_cast<const uint8_t*>(response), sizeof(response) - 1);
+      }
+      length = 0;
+      overflow = false;
+    } else if (c != '\r') {
+      if (length < sizeof(command) - 1) {
+        command[length++] = c;
+      } else {
+        overflow = true;
+      }
+    }
+  }
+}
+
 void setup() {
   Serial.begin(BAUD_RATE);
   Serial.setTxTimeoutMs(0);  // never block the sampling loop when the PC is slow to read
@@ -60,6 +85,7 @@ void setup() {
 }
 
 void loop() {
+  handleIdentification();
   const uint32_t nowUs = micros();
   const int32_t timeUntilSampleUs = static_cast<int32_t>(nextSampleDeadlineUs - nowUs);
   if (timeUntilSampleUs > 0) {

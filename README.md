@@ -11,7 +11,7 @@ Clean, ZIP-download-friendly Python ECG analysis app focused on **offline file a
 Install the project dependencies in Thonny, PyCharm, or a terminal:
 
 ```bash
-pip install neurokit2 numpy scipy pandas PyQt6 pyqtgraph
+pip install neurokit2 numpy scipy pandas PyQt6 pyqtgraph pyserial
 ```
 
 ## Run the app
@@ -47,6 +47,10 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 10. Optionally click **Open Pre-report** to open the expanded review window.
 
 ## USB Input workflow
+
+On startup, the app checks serial ports identified as ESP32/Espressif for VER_V-A firmware. Use **Search for USB unit** to retry, or **Check a COM port** if the port is not identified automatically. Opening a port may reset the board; close the Arduino Serial Monitor or tester first. Upload the current firmware to enable identification. A successful response means the firmware initialized the ADS1115; it does not verify the ECG board or electrodes. The port is released after detection, and the status is a snapshot rather than continuous connection monitoring. File analysis remains available when no unit is found.
+
+**Real USB acquisition is not yet integrated into the main app.** The USB Input workflow below still uses simulated data even if a device is identified.
 
 1. Select **USB Input** in Box 1.
 2. Click **Start** to begin acquisition (simulated stream with production state transitions).

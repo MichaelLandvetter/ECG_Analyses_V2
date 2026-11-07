@@ -36,12 +36,13 @@ from ecg_config import (
     save_processing_settings,
 )
 from ecg_report import save_structured_reports
+from ecg_usb_discovery import DiscoveryResult, discover_devices
 
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
 
 try:
-    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
     from PyQt6.QtWidgets import (
         QApplication,
         QComboBox,
@@ -51,6 +52,7 @@ try:
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QLineEdit,
         QMainWindow,
@@ -229,6 +231,37 @@ def _should_process_usb_stream_tick(
 
 
 if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
+    class USBDiscoveryThread(QThread):
+        """Perform bounded serial probes without blocking the GUI."""
+
+        result_ready = pyqtSignal(object)
+        failed = pyqtSignal(str)
+
+        def __init__(self, manual_port: str | None = None) -> None:
+            super().__init__()
+            self.manual_port = manual_port
+
+        def run(self) -> None:
+            try:
+                import serial
+                from serial.tools import list_ports
+
+                ports = list(list_ports.comports())
+                if self.manual_port:
+                    ports = [port for port in ports if port.device == self.manual_port]
+                    if not ports:
+                        self.failed.emit(f"Port {self.manual_port} is no longer available.")
+                        return
+                result = discover_devices(
+                    ports, serial.Serial, manual=self.manual_port is not None,
+                    cancelled=self.isInterruptionRequested,
+                )
+                self.result_ready.emit(result)
+            except ImportError:
+                self.failed.emit("USB detection requires pyserial. Install it with pip install pyserial.")
+            except OSError as exc:
+                self.failed.emit(f"Could not list USB ports: {exc}")
+
 
     class ReviewPlotWidget(pg.PlotWidget):
         """Plot widget that opens an enlarged view on double-click."""
@@ -503,6 +536,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_raw_signal: np.ndarray | None = None
             self._analysis_layout_file_mode: bool | None = None
             self.processing_settings = load_processing_settings()
+            self._usb_discovery: USBDiscoveryThread | None = None
 
             central_widget = QWidget(self)
             self.setCentralWidget(central_widget)
@@ -516,6 +550,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._set_initial_plots()
             self._on_source_mode_changed()
             self._set_status("Ready for ECG analysis")
+            QTimer.singleShot(0, self._search_usb_devices)
 
         def _build_layout(self) -> None:
             controls_container = QWidget()
@@ -555,7 +590,75 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.source_selector.currentTextChanged.connect(self._on_source_mode_changed)
             layout.addWidget(self.source_selector)
 
+            self.usb_device_label = QLabel("USB device: not checked")
+            self.usb_device_label.setWordWrap(True)
+            layout.addWidget(self.usb_device_label)
+            self.usb_search_button = QPushButton("Search for USB unit")
+            self.usb_search_button.clicked.connect(self._search_usb_devices)
+            layout.addWidget(self.usb_search_button)
+            self.usb_manual_button = QPushButton("Check a COM port")
+            self.usb_manual_button.clicked.connect(self._select_usb_port)
+            layout.addWidget(self.usb_manual_button)
+
             parent.addWidget(frame, 0, column)
+
+        def _search_usb_devices(self, manual_port: str | None = None) -> None:
+            if self._usb_discovery is not None:
+                return
+            self.usb_device_label.setText("USB device: searching...")
+            self.usb_search_button.setEnabled(False)
+            self.usb_manual_button.setEnabled(False)
+            worker = USBDiscoveryThread(manual_port if isinstance(manual_port, str) else None)
+            self._usb_discovery = worker
+            worker.result_ready.connect(self._usb_discovery_result)
+            worker.failed.connect(self._usb_discovery_failed)
+            worker.finished.connect(self._usb_discovery_finished)
+            worker.start()
+
+        def _select_usb_port(self) -> None:
+            try:
+                from serial.tools import list_ports
+                ports = [port.device for port in list_ports.comports()]
+            except ImportError:
+                self._usb_discovery_failed("USB detection requires pyserial. Install it with pip install pyserial.")
+                return
+            except OSError as exc:
+                self._usb_discovery_failed(f"Could not list USB ports: {exc}")
+                return
+            if not ports:
+                self._usb_discovery_failed("No serial ports found. Connect the unit and search again.")
+                return
+            port, accepted = QInputDialog.getItem(self, "Check USB port", "Serial port:", ports, 0, False)
+            if accepted:
+                self._search_usb_devices(port)
+
+        def _usb_discovery_result(self, result: DiscoveryResult) -> None:
+            if len(result.ports) == 1:
+                text = f"USB unit identified: {result.ports[0]} (ADS1115 initialized)"
+            elif result.ports:
+                text = "Multiple USB units found: " + ", ".join(result.ports) + ". Check a port individually."
+            else:
+                text = "USB unit not found. Search again or check a COM port; File Analysis remains available."
+            if result.errors:
+                text += " Port errors: " + "; ".join(result.errors)
+            self.usb_device_label.setText(text)
+
+        def _usb_discovery_failed(self, message: str) -> None:
+            self.usb_device_label.setText("USB detection: " + message)
+
+        def _usb_discovery_finished(self) -> None:
+            worker = self._usb_discovery
+            self._usb_discovery = None
+            if worker is not None:
+                worker.deleteLater()
+            self.usb_search_button.setEnabled(True)
+            self.usb_manual_button.setEnabled(True)
+
+        def closeEvent(self, event: Any) -> None:
+            if self._usb_discovery is not None:
+                self._usb_discovery.requestInterruption()
+                self._usb_discovery.wait()
+            super().closeEvent(event)
 
         def _build_file_controls(self, parent: QGridLayout, column: int) -> None:
             frame = QGroupBox("ECG Data File")
@@ -771,13 +874,13 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             if not is_file_mode:
                 self.file_status_label.setText(
-                    "USB Input active. Use Start / Pause / Resume / End controls."
+                    "USB Input is currently simulated; real USB streaming is not yet integrated."
                 )
                 if self.usb_acquisition_state == "idle":
                     if self.latest_result_mode == "usb":
                         self._set_status("USB results ready. Save reports or Reset before starting a new session.")
                     else:
-                        self._set_status("USB Input ready. Click Start to begin acquisition.")
+                        self._set_status("USB simulation ready. Real USB streaming is not yet integrated.")
             elif self.selected_file:
                 self.file_status_label.setText(Path(self.selected_file).name)
             else:
@@ -971,7 +1074,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 sampling_rate=settings["sampling_rate_hz"],
             )
             self.usb_timer.start()
-            self._set_status("USB acquisition started.")
+            self._set_status("Simulated USB acquisition started; this is not data from the connected device.")
             self._refresh_usb_preview_plot()
             self._update_action_controls()
 
@@ -980,7 +1083,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self.usb_acquisition_state = "paused"
                 self.acquisition_running = False
                 self.usb_timer.stop()
-                self._set_status("USB acquisition paused.")
+                self._set_status("Simulated USB acquisition paused.")
                 self._update_action_controls()
                 return
 
@@ -991,7 +1094,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self.usb_acquisition_state = "running"
                 self.acquisition_running = True
                 self.usb_timer.start()
-                self._set_status("USB acquisition resumed.")
+                self._set_status("Simulated USB acquisition resumed.")
                 self._refresh_usb_preview_plot()
                 self._update_action_controls()
 
