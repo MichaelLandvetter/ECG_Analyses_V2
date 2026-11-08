@@ -25,7 +25,6 @@ from ecg_config import (
     DEFAULT_FILTER_HIGH_CUT_HZ,
     DEFAULT_FILTER_LOW_CUT_HZ,
     DEFAULT_FILTER_MODE,
-    DEFAULT_INPUT_SOURCE,
     DEFAULT_POWERLINE_FREQUENCY_HZ,
     DEFAULT_ROLLING_WINDOW_SECONDS,
     DEFAULT_RPEAK_METHOD,
@@ -195,6 +194,8 @@ def _derive_action_controls(
     acquisition_running: bool,
     usb_acquisition_state: str,
     latest_result_mode: str | None,
+    has_file: bool = True,
+    usb_stream_available: bool = True,
 ) -> dict[str, Any]:
     """Compute mode-aware button state and labels."""
     has_results = latest_result_mode == ("file" if is_file_mode else "usb")
@@ -210,14 +211,15 @@ def _derive_action_controls(
     }
 
     if is_file_mode:
-        controls["start_text"] = "Re-run Analysis" if has_results else "Start"
-        controls["start_enabled"] = not acquisition_running
+        controls["start_text"] = "Re-run Analysis" if has_results else "Start analysis"
+        controls["start_enabled"] = has_file and not acquisition_running
         return controls
 
     controls["pause_text"] = "Resume" if usb_acquisition_state == "paused" else "Pause"
+    controls["start_text"] = "Start acquisition"
     controls["pause_enabled"] = usb_acquisition_state in {"running", "paused"}
     controls["end_enabled"] = usb_acquisition_state in {"running", "paused"}
-    controls["start_enabled"] = usb_acquisition_state == "idle"
+    controls["start_enabled"] = usb_acquisition_state == "idle" and usb_stream_available
     return controls
 
 
@@ -261,6 +263,78 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self.failed.emit("USB detection requires pyserial. Install it with pip install pyserial.")
             except OSError as exc:
                 self.failed.emit(f"Could not list USB ports: {exc}")
+
+
+    class StartupDiscoveryDialog(QDialog):
+        """Show startup progress and let the user retry or continue."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("VER_V-A")
+            self.setMinimumWidth(420)
+            self.result = DiscoveryResult((), ())
+            self.worker: USBDiscoveryThread | None = None
+            layout = QVBoxLayout(self)
+            title = QLabel("VER_V-A")
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title.setStyleSheet("font-size: 24px; font-weight: bold;")
+            layout.addWidget(title)
+            self.message = QLabel("Scanning for USB units...")
+            self.message.setWordWrap(True)
+            layout.addWidget(self.message)
+            buttons = QHBoxLayout()
+            self.retry_button = QPushButton("Search again")
+            self.retry_button.clicked.connect(self.search)
+            self.continue_button = QPushButton("Continue")
+            self.continue_button.clicked.connect(self.accept)
+            buttons.addWidget(self.retry_button)
+            buttons.addWidget(self.continue_button)
+            layout.addLayout(buttons)
+            self.retry_button.setEnabled(False)
+            self.continue_button.setEnabled(False)
+            QTimer.singleShot(0, self.search)
+
+        def search(self) -> None:
+            if self.worker is not None:
+                return
+            self.message.setText("Scanning for USB units...")
+            self.retry_button.setEnabled(False)
+            self.continue_button.setEnabled(False)
+            self.worker = USBDiscoveryThread()
+            self.worker.result_ready.connect(self._show_result)
+            self.worker.failed.connect(self._show_error)
+            self.worker.finished.connect(self._finished)
+            self.worker.start()
+
+        def _show_result(self, result: DiscoveryResult) -> None:
+            self.result = result
+            if len(result.ports) == 1:
+                message = f"USB unit found: {result.ports[0]}."
+            elif result.ports:
+                message = "Multiple USB units found: " + ", ".join(result.ports) + ". Select a port in the main window."
+            else:
+                message = "No USB unit found. You can continue with File Analysis."
+            if result.errors:
+                message += "\nPort errors: " + "; ".join(result.errors)
+            self.message.setText(message)
+
+        def _show_error(self, message: str) -> None:
+            self.result = DiscoveryResult((), ())
+            self.message.setText(f"USB search failed: {message}\nYou can continue with File Analysis.")
+
+        def _finished(self) -> None:
+            worker = self.worker
+            self.worker = None
+            if worker is not None:
+                worker.deleteLater()
+            self.retry_button.setEnabled(True)
+            self.continue_button.setEnabled(True)
+
+        def done(self, result: int) -> None:
+            if self.worker is not None:
+                self.worker.requestInterruption()
+                self.worker.wait()
+            super().done(result)
 
 
     class ReviewPlotWidget(pg.PlotWidget):
@@ -517,12 +591,14 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
     class ECGDesktopApp(QMainWindow):
         """Desktop UI for clean offline ECG file analysis."""
 
-        def __init__(self) -> None:
+        def __init__(self, initial_usb_result: DiscoveryResult | None = None) -> None:
             super().__init__()
-            self.setWindowTitle("ECG Analysis")
+            self.setWindowTitle("VER_V-A")
             self.resize(1320, 900)
 
             self.selected_file: str | None = None
+            self.usb_ports = initial_usb_result.ports if initial_usb_result else ()
+            self.input_mode = "USB Input" if len(self.usb_ports) == 1 else "File Analysis"
             self.acquisition_running = False
             self.usb_acquisition_state = "idle"
             self.usb_session_chunks: list[np.ndarray] = []
@@ -549,19 +625,39 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._apply_processing_settings(self.processing_settings)
             self._set_initial_plots()
             self._on_source_mode_changed()
-            self._set_status("Ready for ECG analysis")
-            QTimer.singleShot(0, self._search_usb_devices)
+            self._usb_discovery_result(initial_usb_result or DiscoveryResult((), ()))
 
         def _build_layout(self) -> None:
+            file_menu = self.menuBar().addMenu("File")
+            self.open_file_action = file_menu.addAction("Open ECG file...")
+            self.open_file_action.triggered.connect(self._select_ecg_file)
+            self.switch_usb_action = file_menu.addAction("Switch to USB input")
+            self.switch_usb_action.triggered.connect(self._switch_to_usb)
+            file_menu.addSeparator()
+            self.usb_search_button = file_menu.addAction("Search for USB unit")
+            self.usb_search_button.triggered.connect(self._search_usb_devices)
+            self.usb_manual_button = file_menu.addAction("Check a COM port...")
+            self.usb_manual_button.triggered.connect(self._select_usb_port)
+            file_menu.addSeparator()
+            file_menu.addAction("Exit").triggered.connect(self.close)
+            help_menu = self.menuBar().addMenu("Help")
+            help_menu.addAction("About VER_V-A").triggered.connect(
+                lambda: self._show_info("About VER_V-A", "VER_V-A ECG analysis and acquisition software.")
+            )
+
+            self.source_status_label = QLabel()
+            self.source_status_label.setWordWrap(True)
+            self.root_layout.addWidget(self.source_status_label)
+            self.usb_device_label = QLabel("USB device: not checked")
+            self.usb_device_label.setWordWrap(True)
+            self.root_layout.addWidget(self.usb_device_label)
             controls_container = QWidget()
             controls_layout = QGridLayout(controls_container)
             controls_layout.setContentsMargins(0, 0, 0, 0)
 
-            self._build_source_controls(controls_layout, 0)
-            self._build_file_controls(controls_layout, 1)
-            self._build_filter_controls(controls_layout, 2)
-            self._build_rpeak_controls(controls_layout, 3)
-            self._build_action_controls(controls_layout, 4)
+            self._build_filter_controls(controls_layout, 0)
+            self._build_rpeak_controls(controls_layout, 1)
+            self._build_action_controls(controls_layout, 2)
 
             self.root_layout.addWidget(controls_container)
 
@@ -580,27 +676,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             self.status_label = QLabel("Ready")
             self.root_layout.addWidget(self.status_label)
-
-        def _build_source_controls(self, parent: QGridLayout, column: int) -> None:
-            frame = QGroupBox("File or USB Input")
-            layout = QVBoxLayout(frame)
-
-            self.source_selector = QComboBox()
-            self.source_selector.addItems(["File Analysis", "USB Input"])
-            self.source_selector.currentTextChanged.connect(self._on_source_mode_changed)
-            layout.addWidget(self.source_selector)
-
-            self.usb_device_label = QLabel("USB device: not checked")
-            self.usb_device_label.setWordWrap(True)
-            layout.addWidget(self.usb_device_label)
-            self.usb_search_button = QPushButton("Search for USB unit")
-            self.usb_search_button.clicked.connect(self._search_usb_devices)
-            layout.addWidget(self.usb_search_button)
-            self.usb_manual_button = QPushButton("Check a COM port")
-            self.usb_manual_button.clicked.connect(self._select_usb_port)
-            layout.addWidget(self.usb_manual_button)
-
-            parent.addWidget(frame, 0, column)
 
         def _search_usb_devices(self, manual_port: str | None = None) -> None:
             if self._usb_discovery is not None:
@@ -633,8 +708,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._search_usb_devices(port)
 
         def _usb_discovery_result(self, result: DiscoveryResult) -> None:
+            self.usb_ports = result.ports
             if len(result.ports) == 1:
-                text = f"USB unit identified: {result.ports[0]} (ADS1115 initialized)"
+                text = f"USB unit identified: {result.ports[0]} (ADS1115 initialized; detection is a snapshot)"
             elif result.ports:
                 text = "Multiple USB units found: " + ", ".join(result.ports) + ". Check a port individually."
             else:
@@ -642,9 +718,14 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             if result.errors:
                 text += " Port errors: " + "; ".join(result.errors)
             self.usb_device_label.setText(text)
+            if not self.selected_file and self.usb_acquisition_state == "idle":
+                self.input_mode = "USB Input" if len(result.ports) == 1 else "File Analysis"
+            self._on_source_mode_changed()
 
         def _usb_discovery_failed(self, message: str) -> None:
+            self.usb_ports = ()
             self.usb_device_label.setText("USB detection: " + message)
+            self._on_source_mode_changed()
 
         def _usb_discovery_finished(self) -> None:
             worker = self._usb_discovery
@@ -659,20 +740,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._usb_discovery.requestInterruption()
                 self._usb_discovery.wait()
             super().closeEvent(event)
-
-        def _build_file_controls(self, parent: QGridLayout, column: int) -> None:
-            frame = QGroupBox("ECG Data File")
-            layout = QVBoxLayout(frame)
-
-            self.file_status_label = QLabel("No file selected")
-            self.file_status_label.setWordWrap(True)
-            layout.addWidget(self.file_status_label)
-
-            self.file_button = QPushButton("Choose ECG File")
-            self.file_button.clicked.connect(self._select_ecg_file)
-            layout.addWidget(self.file_button)
-
-            parent.addWidget(frame, 0, column)
 
         def _build_filter_controls(self, parent: QGridLayout, column: int) -> None:
             frame = QGroupBox("ECG Filter Settings")
@@ -799,7 +866,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             parent.addStretch(1)
 
         def _apply_processing_settings(self, settings: dict[str, Any]) -> None:
-            self.source_selector.setCurrentText(normalize_input_source(settings.get("input_source", DEFAULT_INPUT_SOURCE)))
             self.filter_mode_selector.setCurrentText(str(settings.get("filter_mode", DEFAULT_FILTER_MODE)))
             self.low_cut_input.setText(str(settings.get("filter_low_cut_hz", DEFAULT_FILTER_LOW_CUT_HZ)))
             self.high_cut_input.setText(str(settings.get("filter_high_cut_hz", DEFAULT_FILTER_HIGH_CUT_HZ)))
@@ -868,32 +934,26 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._analysis_layout_file_mode = is_file_mode
 
         def _on_source_mode_changed(self) -> None:
-            is_file_mode = self.source_selector.currentText() == "File Analysis"
-            self.file_button.setEnabled(is_file_mode)
+            is_file_mode = self.input_mode == "File Analysis"
             self._apply_analysis_layout(is_file_mode=is_file_mode)
 
             if not is_file_mode:
-                self.file_status_label.setText(
-                    "USB Input is currently simulated; real USB streaming is not yet integrated."
-                )
-                if self.usb_acquisition_state == "idle":
-                    if self.latest_result_mode == "usb":
-                        self._set_status("USB results ready. Save reports or Reset before starting a new session.")
-                    else:
-                        self._set_status("USB simulation ready. Real USB streaming is not yet integrated.")
+                self.source_status_label.setText("Active source: USB input — live acquisition is not yet available.")
             elif self.selected_file:
-                self.file_status_label.setText(Path(self.selected_file).name)
+                self.source_status_label.setText(f"Active source: ECG file — {Path(self.selected_file).name}")
             else:
-                self.file_status_label.setText("No file selected")
+                self.source_status_label.setText("Active source: none — open an ECG file or connect a USB unit.")
             self._update_action_controls()
 
         def _update_action_controls(self) -> None:
-            is_file_mode = self.source_selector.currentText() == "File Analysis"
+            is_file_mode = self.input_mode == "File Analysis"
             controls = _derive_action_controls(
                 is_file_mode=is_file_mode,
                 acquisition_running=self.acquisition_running,
                 usb_acquisition_state=self.usb_acquisition_state,
                 latest_result_mode=self.latest_result_mode,
+                has_file=self.selected_file is not None,
+                usb_stream_available=False,
             )
             self._apply_analysis_layout(is_file_mode=controls["show_beat_plot"])
             self.start_button.setText(str(controls["start_text"]))
@@ -903,8 +963,23 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.end_button.setEnabled(bool(controls["end_enabled"]))
             self.save_reports_button.setEnabled(bool(controls["save_enabled"]))
             self.detailed_review_button.setEnabled(bool(controls["review_enabled"]))
+            self.switch_usb_action.setEnabled(len(self.usb_ports) == 1 and not self.acquisition_running)
+            self.open_file_action.setEnabled(not self.acquisition_running)
+            self.start_button.setToolTip(
+                "Real USB acquisition is not yet integrated." if not is_file_mode else ""
+            )
+
+        def _switch_to_usb(self) -> None:
+            if len(self.usb_ports) != 1 or self.acquisition_running:
+                return
+            self.input_mode = "USB Input"
+            self._set_initial_plots()
+            self._on_source_mode_changed()
+            self._set_status("USB unit selected. Real USB acquisition is not yet integrated.")
 
         def _select_ecg_file(self) -> None:
+            if self.acquisition_running:
+                return
             file_path, _filter = QFileDialog.getOpenFileName(
                 self,
                 "Select ECG data file",
@@ -915,7 +990,14 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 return
 
             self.selected_file = file_path
-            self.file_status_label.setText(Path(file_path).name)
+            self.input_mode = "File Analysis"
+            self.latest_results = None
+            self.latest_result_mode = None
+            self.latest_report_input_file = None
+            self.latest_raw_signal = None
+            self.latest_source = ""
+            self._set_initial_plots()
+            self._on_source_mode_changed()
             self._set_status(f"Selected file: {file_path}")
 
         def _get_current_processing_settings(self) -> dict[str, Any]:
@@ -940,7 +1022,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 raise ValueError("Rolling window must be greater than 0 seconds.")
 
             return {
-                "input_source": normalize_input_source(self.source_selector.currentText()),
+                "input_source": normalize_input_source(self.input_mode),
                 "sampling_rate_hz": sampling_rate,
                 "filter_mode": filter_mode,
                 "filter_low_cut_hz": low_cut_hz,
@@ -965,7 +1047,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._show_error("Invalid processing settings", str(exc))
                 return
 
-            if not self.selected_file:
+            if self.input_mode != "File Analysis" or not self.selected_file:
                 self.processing_settings = settings
                 self._set_status("Filter settings saved in the current session. Select a file to preview them.")
                 return
@@ -991,8 +1073,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._update_action_controls()
 
         def _start_or_rerun(self) -> None:
-            if self.source_selector.currentText() == "USB Input":
-                self._start_usb_acquisition()
+            if self.input_mode == "USB Input":
+                self._show_info("USB Input", "Real USB acquisition is not yet integrated.")
                 return
             self._start_file_analysis()
 
@@ -1295,6 +1377,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_raw_signal = None
             self.latest_report_input_file = None
             self.selected_file = None
+            self.input_mode = "USB Input" if len(self.usb_ports) == 1 else "File Analysis"
             self.processing_settings = load_processing_settings()
 
             self._apply_processing_settings(self.processing_settings)
@@ -1366,13 +1449,13 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.ecg_plot.clear()
             self.ecg_plot.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0))
             self.ecg_plot.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2))
-            if self.source_selector.currentText() == "USB Input" and results is None:
+            if self.input_mode == "USB Input" and results is None:
                 self.ecg_plot.setTitle("Raw ECG + Filtered ECG live preview")
             else:
                 self.ecg_plot.setTitle("Full ECG: raw, filtered, and R-peaks" if results else "Raw ECG + Filtered ECG preview")
 
             self.hr_plot.clear()
-            if self.source_selector.currentText() == "USB Input" and results is None:
+            if self.input_mode == "USB Input" and results is None:
                 self.hr_plot.setTitle("Heart-rate live trend")
             else:
                 self.hr_plot.setTitle("Heart-rate over full duration")
@@ -1503,6 +1586,9 @@ def launch_ecg_ui() -> int:
     if app is None:
         app = QApplication(sys.argv)
 
-    window = ECGDesktopApp()
+    startup = StartupDiscoveryDialog()
+    if startup.exec() != QDialog.DialogCode.Accepted:
+        return 0
+    window = ECGDesktopApp(initial_usb_result=startup.result)
     window.show()
     return app.exec()
