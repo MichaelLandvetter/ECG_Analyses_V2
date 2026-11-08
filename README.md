@@ -30,14 +30,14 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 
 ## File Analysis workflow
 
-1. Launch the app and keep **File Analysis** selected in Box 1.
-2. Choose an ECG data file (`.txt`, `.csv`, or `.npy`).
+1. Launch the app. After the USB search, choose **Continue**.
+2. Select **File > Open ECG file** and choose a file (`.txt`, `.csv`, or `.npy`).
 3. In **ECG Filter Settings**, select either:
    - `NeuroKit2 ecg_clean`
    - `Butterworth bandpass`
 4. Optionally adjust Butterworth low/high cut values and click **Apply Filter** to refresh the preview.
 5. In **R-peak Detection**, choose the detector method (`hamilton2002` default).
-6. Click **Start** to run the offline analysis. A processing dialog is shown while the full analysis is computed.
+6. Click **Start analysis** to run the offline analysis. A processing dialog is shown while the full analysis is computed.
 7. Results are rendered directly in the main **Analysis View** with a 3-panel layout:
    - full ECG raw + filtered + R-peaks
    - full-duration heart-rate plot
@@ -48,17 +48,11 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 
 ## USB Input workflow
 
-On startup, the app checks serial ports identified as ESP32/Espressif for VER_V-A firmware. Use **Search for USB unit** to retry, or **Check a COM port** if the port is not identified automatically. Opening a port may reset the board; close the Arduino Serial Monitor or tester first. Upload the current firmware to enable identification. A successful response means the firmware initialized the ADS1115; it does not verify the ECG board or electrodes. The port is released after detection, and the status is a snapshot rather than continuous connection monitoring. File analysis remains available when no unit is found.
+On startup, the app checks serial ports identified as ESP32/Espressif for VER_V-A firmware. The startup screen shows the result and offers **Search again** or **Continue**. In the main window, use **File > Search for USB unit** to retry, or **File > Check a COM port** if the port is not identified automatically. Opening a port may reset the board; close the Arduino Serial Monitor or tester first. Upload the current firmware to enable identification. A successful response means the firmware initialized the ADS1115; it does not verify the ECG board or electrodes. The port is released after detection, and the status is a snapshot rather than continuous connection monitoring.
 
-**Real USB acquisition is not yet integrated into the main app.** The USB Input workflow below still uses simulated data even if a device is identified.
+Opening a file selects file analysis even when a unit is detected. **File > Switch to USB input** returns to the USB source if exactly one unit was identified. If multiple units are detected, use **Check a COM port** to select one.
 
-1. Select **USB Input** in Box 1.
-2. Click **Start** to begin acquisition (simulated stream with production state transitions).
-3. Click **Pause** and **Resume** as needed during the same acquisition session.
-4. Click **End** to finalize the session and save the raw USB capture file.
-5. During capture, the Analysis View switches to a 2-panel live layout (raw/filtered preview + live HR trend) and hides beat snippets.
-6. On **End**, the app saves the raw USB file, runs offline full analysis from the saved file, then opens the pre-report review window automatically.
-7. Use **Save Reports** to export reports from the completed USB session analysis.
+**Real USB acquisition is not yet integrated into the main app.** Start acquisition is disabled, so simulated data cannot be mistaken for real device data. Continue to use the standalone USB Stream Tester for live acquisition.
 
 ## USB Stream Tester
 
