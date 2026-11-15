@@ -39,9 +39,9 @@ class TestStartupFlow(unittest.TestCase):
         self.addCleanup(window.close)
         self.assertEqual(window.input_mode, "USB Input")
         self.assertIn("COM4", window.source_status_label.text())
-        self.assertIn("not yet available", window.source_status_label.text())
+        self.assertIn("ready for acquisition", window.source_status_label.text())
         self.assertEqual(window.start_button.text(), "Start acquisition")
-        self.assertFalse(window.start_button.isEnabled())
+        self.assertTrue(window.start_button.isEnabled())
         self.assertEqual(window.analysis_views.currentIndex(), 1)
         with patch.object(QFileDialog, "getOpenFileName", return_value=("/tmp/example.csv", "")):
             window._select_ecg_file()
@@ -52,7 +52,7 @@ class TestStartupFlow(unittest.TestCase):
         self.assertIs(window.analysis_views.currentWidget(), window.file_analysis_message)
         window._switch_to_usb()
         self.assertEqual(window.input_mode, "USB Input")
-        self.assertFalse(window.start_button.isEnabled())
+        self.assertTrue(window.start_button.isEnabled())
         self.assertEqual(window.analysis_views.currentIndex(), 1)
         self.assertIn("COM4", window.source_status_label.text())
 
