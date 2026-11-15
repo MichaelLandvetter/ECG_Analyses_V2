@@ -10,6 +10,7 @@ from ecg_acquisition import generate_synthetic_ecg
 from ecg_analysis import (
     NeuroKit2UnavailableError,
     analyze_ecg,
+    beat_to_beat_heart_rate_trace,
     detect_r_peaks,
     estimate_live_heart_rate_trace,
     validate_filter_settings,
@@ -42,6 +43,36 @@ class TestECGScaffold(unittest.TestCase):
         self.assertIn("continuous_time_series", result["report_tables"])
         self.assertIn("raw_signal", result["artifacts"])
         self.assertIn("filtered_signal", result["artifacts"])
+        peaks = np.asarray(result["artifacts"]["r_peaks"], dtype=int)
+        expected = beat_to_beat_heart_rate_trace(peaks, 250, len(signal))
+        actual = np.asarray(result["artifacts"]["heart_rate_trace_bpm"], dtype=float)
+        np.testing.assert_allclose(actual, expected, equal_nan=True)
+        finite = expected[np.isfinite(expected)]
+        if finite.size:
+            self.assertAlmostEqual(result["metrics"]["mean_heart_rate_bpm"], np.mean(finite))
+        else:
+            self.assertIsNone(result["metrics"]["mean_heart_rate_bpm"])
+        rows = result["report_tables"]["continuous_time_series"]
+        for index in range(len(signal)):
+            if np.isnan(expected[index]):
+                self.assertIsNone(rows[index]["heart_rate_bpm"])
+            else:
+                self.assertAlmostEqual(rows[index]["heart_rate_bpm"], expected[index])
+
+    def test_beat_to_beat_rates_are_held_from_second_peak(self) -> None:
+        trace = beat_to_beat_heart_rate_trace([1, 5, 7], sampling_rate=4, num_samples=10)
+        self.assertTrue(np.isnan(trace[:5]).all())
+        np.testing.assert_allclose(trace[5:7], [60.0, 60.0])
+        np.testing.assert_allclose(trace[7:], [120.0, 120.0, 120.0])
+
+    def test_beat_to_beat_rate_with_fewer_than_two_peaks_is_unavailable(self) -> None:
+        for peaks in ([], [3]):
+            self.assertTrue(np.isnan(beat_to_beat_heart_rate_trace(peaks, 250, 10)).all())
+
+    def test_beat_to_beat_rate_rejects_invalid_peaks(self) -> None:
+        for peaks in ([1, 1], [4, 3], [-1, 3], [3, 10]):
+            with self.subTest(peaks=peaks), self.assertRaises(ValueError):
+                beat_to_beat_heart_rate_trace(peaks, 250, 10)
 
     def test_validate_filter_settings_rejects_invalid_high_cut(self) -> None:
         with self.assertRaises(ValueError):

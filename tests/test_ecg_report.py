@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 
+from ecg_acquisition import generate_synthetic_ecg
+from ecg_analysis import NeuroKit2UnavailableError, analyze_ecg
 from ecg_config import DEFAULT_INPUT_SOURCE, load_processing_settings, save_processing_settings
 from ecg_report import (
     AVERAGE_TEMPLATE_COLUMNS,
@@ -21,6 +24,29 @@ from ecg_report import (
 
 class TestECGReportHelpers(unittest.TestCase):
     """Validate core non-UI export behavior."""
+
+    def test_exported_heart_rates_match_analysis(self) -> None:
+        signal = generate_synthetic_ecg(duration_seconds=6, sampling_rate=250)
+        try:
+            results = analyze_ecg(signal, sampling_rate=250)
+        except NeuroKit2UnavailableError:
+            self.skipTest("NeuroKit2 not installed in current environment")
+        trace = results["artifacts"]["heart_rate_trace_bpm"]
+        self.assertIn(None, trace)
+        self.assertTrue(any(value is not None for value in trace))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = save_structured_reports(results, str(Path(tmpdir) / "recording.csv"), "test", write_json=True)
+            with paths["continuous_time_series_csv"].open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            for value, row in zip(trace, rows, strict=True):
+                if value is None:
+                    self.assertEqual(row["heart_rate_bpm"], "")
+                else:
+                    self.assertAlmostEqual(float(row["heart_rate_bpm"]), value)
+            with paths["json_report"].open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(payload["results"]["artifacts"]["heart_rate_trace_bpm"], trace)
 
     def test_save_and_load_processing_settings_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
