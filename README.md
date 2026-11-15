@@ -53,7 +53,7 @@ On startup, the app checks serial ports identified as ESP32/Espressif for VER_V-
 
 Opening a file selects file analysis even when a unit is detected. **File > Switch to USB input** returns to the USB source if exactly one unit was identified. If multiple units are detected, use **Check a COM port** to select one.
 
-The USB view contains raw/filtered ECG and heart-rate plots. Beat snippets are shown in the pre-report after analysis. To acquire from a detected unit:
+The USB view contains raw/filtered ECG and heart-rate plots. Both plots show a preview delayed by about one second, plus the normal screen refresh time, so that the filter can use additional data on both sides of the visible window. This reduces but may not eliminate filter edge artifacts. The preview starts after enough samples arrive, and its displayed window reaches the selected length as the buffer fills. Recorded raw samples and the final full-record analysis are not delayed or otherwise changed. The live heart-rate estimate uses its own smoothed peak estimator, not the selected offline R-peak method. Beat snippets are shown in the pre-report after analysis. To acquire from a detected unit:
 
 1. Select **File > Switch to USB input** if necessary, set the sampling rate to **250 Hz** in ECG Processing Settings, and click **Start acquisition**.
 2. Choose a new CSV file for the recording. The app does not overwrite existing files.

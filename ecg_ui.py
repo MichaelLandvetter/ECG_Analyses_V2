@@ -44,6 +44,7 @@ from ecg_usb_stream import ECGSerialStream, USBStreamError
 
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
+USB_PREVIEW_FILTER_CONTEXT_SECONDS = 1
 
 try:
     from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
@@ -944,7 +945,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.rolling_window_input = QLineEdit(str(DEFAULT_ROLLING_WINDOW_SECONDS))
             rolling_window_layout.addRow("Window length (s):", self.rolling_window_input)
             rolling_window_layout.addRow(
-                QLabel("Used for USB preview buffering behavior."),
+                QLabel("USB preview is delayed by approximately 1 second to reduce filter edge effects."),
             )
             parent.addWidget(rolling_window_group)
 
@@ -1227,7 +1228,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 return
 
             self.usb_recording = recording
-            self.usb_preview = deque(maxlen=settings["sampling_rate_hz"] * settings["rolling_window_seconds"])
+            self.usb_preview = deque(
+                maxlen=settings["sampling_rate_hz"]
+                * (settings["rolling_window_seconds"] + 2 * USB_PREVIEW_FILTER_CONTEXT_SECONDS)
+            )
             self.usb_session_settings = settings
             self.usb_stop_requested = False
             self.usb_acquisition_state = "connecting"
@@ -1351,19 +1355,20 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 return
 
             raw_signal = np.asarray(self.usb_preview, dtype=float)
-            if raw_signal.size < 3:
+            context_samples = settings["sampling_rate_hz"] * USB_PREVIEW_FILTER_CONTEXT_SECONDS
+            preview_end = raw_signal.size - context_samples
+            if preview_end < 3:
                 return
 
             window_samples = max(
                 3,
                 int(settings["sampling_rate_hz"] * max(1, int(settings["rolling_window_seconds"]))),
             )
-            preview_start = max(0, raw_signal.size - window_samples)
-            preview_raw = raw_signal[preview_start:]
+            preview_start = max(0, preview_end - window_samples)
 
             try:
                 filtered_signal = clean_ecg_signal(
-                    signal=preview_raw,
+                    signal=raw_signal,
                     sampling_rate=settings["sampling_rate_hz"],
                     filter_mode=settings["filter_mode"],
                     low_cut_hz=settings["filter_low_cut_hz"],
@@ -1372,9 +1377,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 )
             except (NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
                 self._set_status(f"Live filter unavailable: {exc}")
-                filtered_signal = preview_raw.copy()
+                filtered_signal = raw_signal.copy()
 
-            preview_filtered = filtered_signal
+            preview_raw = raw_signal[preview_start:preview_end]
+            preview_filtered = filtered_signal[preview_start:preview_end]
             live_hr = estimate_live_heart_rate_trace(
                 signal=preview_filtered,
                 sampling_rate=settings["sampling_rate_hz"],
@@ -1384,7 +1390,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 filtered_signal=preview_filtered,
                 results=None,
                 sampling_rate=settings["sampling_rate_hz"],
-                time_offset_seconds=float(preview_start / settings["sampling_rate_hz"]),
                 live_heart_rate=live_hr,
             )
 
@@ -1513,7 +1518,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.ecg_plot.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0))
             self.ecg_plot.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2))
             if self.input_mode == "USB Input" and results is None:
-                self.ecg_plot.setTitle("Raw ECG + Filtered ECG live preview")
+                self.ecg_plot.setTitle("Raw ECG + Filtered ECG live preview (about 1 s delay)")
             else:
                 self.ecg_plot.setTitle("Full ECG: raw, filtered, and R-peaks" if results else "Raw ECG + Filtered ECG preview")
 
