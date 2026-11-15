@@ -35,16 +35,15 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 3. In **ECG Filter Settings**, select either:
    - `NeuroKit2 ecg_clean`
    - `Butterworth bandpass`
-4. Optionally adjust Butterworth low/high cut values and click **Apply Filter** to refresh the preview.
+4. Optionally adjust Butterworth low/high cut values and click **Apply Filter** to apply the settings.
 5. In **R-peak Detection**, choose the detector method (`hamilton2002` default).
 6. Click **Start analysis** to run the offline analysis. A processing dialog is shown while the full analysis is computed.
-7. Results are rendered directly in the main **Analysis View** with a 3-panel layout:
+7. Results open automatically in the **Pre-report** window:
    - full ECG raw + filtered + R-peaks
    - full-duration heart-rate plot
    - beat snippets with average template overlay plus per-beat P/Q/S/T markers from NeuroKit2 delineation
-8. Use **Re-run Analysis** after the first run when processing settings are changed.
-9. Click **Save Reports** to export CSV report files.
-10. Optionally click **Open Pre-report** to open the expanded review window.
+8. Close the pre-report and use **Re-run Analysis** if processing settings are changed.
+9. Click **Save Reports** to export CSV report files, or **Open Pre-report** to review results again.
 
 ## USB Input workflow
 
@@ -52,7 +51,7 @@ On startup, the app checks serial ports identified as ESP32/Espressif for VER_V-
 
 Opening a file selects file analysis even when a unit is detected. **File > Switch to USB input** returns to the USB source if exactly one unit was identified. If multiple units are detected, use **Check a COM port** to select one.
 
-**Real USB acquisition is not yet integrated into the main app.** Start acquisition is disabled, so simulated data cannot be mistaken for real device data. Continue to use the standalone USB Stream Tester for live acquisition.
+The USB view contains raw/filtered ECG and heart-rate plots. Beat snippets are shown in the pre-report after analysis. **Real USB acquisition is not yet integrated into the main app.** Start acquisition is disabled, so simulated data cannot be mistaken for real device data. Continue to use the standalone USB Stream Tester for live acquisition.
 
 ## USB Stream Tester
 
@@ -160,7 +159,7 @@ A text summary report is also written in the same folder.
 
 ## Current scope
 
-- **Implemented now:** File Analysis (3-panel review), USB live capture controls (Start/Pause/Resume/End), automatic USB end-to-offline-analysis pre-report flow, settings save/load, CSV export.
+- **Implemented now:** File analysis with a pre-report review, USB device identification, settings save/load, and CSV report export. Live USB capture in the main app is not yet implemented.
 
 ## Project structure
 
