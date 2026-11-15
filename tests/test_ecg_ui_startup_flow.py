@@ -127,6 +127,22 @@ class TestStartupFlow(unittest.TestCase):
         self.assertEqual(dialog.result.ports, ())
         self.assertIn("Missing pyserial", dialog.message.text())
 
+    def test_found_unit_defaults_to_continue(self):
+        dialog = StartupDiscoveryDialog()
+        self.addCleanup(dialog.close)
+        dialog._show_result(DiscoveryResult(("COM4",), ()))
+        dialog._finished()
+        self.assertTrue(dialog.continue_button.isDefault())
+        self.assertFalse(dialog.retry_button.isDefault())
+
+    def test_no_unit_defaults_to_retry(self):
+        dialog = StartupDiscoveryDialog()
+        self.addCleanup(dialog.close)
+        dialog._show_result(DiscoveryResult((), ()))
+        dialog._finished()
+        self.assertTrue(dialog.retry_button.isDefault())
+        self.assertFalse(dialog.continue_button.isDefault())
+
 
 if __name__ == "__main__":
     unittest.main()
