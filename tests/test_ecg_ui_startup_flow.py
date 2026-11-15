@@ -25,7 +25,10 @@ class TestStartupFlow(unittest.TestCase):
     def test_no_device_or_file_disables_start(self):
         window = ECGDesktopApp(DiscoveryResult((), ()))
         self.addCleanup(window.close)
-        self.assertIn("none", window.source_status_label.text())
+        self.assertEqual(
+            window.source_status_label.text(),
+            "No acquisition USB link found. File analysis available.",
+        )
         self.assertFalse(window.start_button.isEnabled())
         self.assertFalse(window.switch_usb_action.isEnabled())
         self.assertIs(window.analysis_views.currentWidget(), window.file_analysis_message)
@@ -35,6 +38,8 @@ class TestStartupFlow(unittest.TestCase):
         window = ECGDesktopApp(DiscoveryResult(("COM4",), ()))
         self.addCleanup(window.close)
         self.assertEqual(window.input_mode, "USB Input")
+        self.assertIn("COM4", window.source_status_label.text())
+        self.assertIn("not yet available", window.source_status_label.text())
         self.assertEqual(window.start_button.text(), "Start acquisition")
         self.assertFalse(window.start_button.isEnabled())
         self.assertEqual(window.analysis_views.currentIndex(), 1)
@@ -49,6 +54,7 @@ class TestStartupFlow(unittest.TestCase):
         self.assertEqual(window.input_mode, "USB Input")
         self.assertFalse(window.start_button.isEnabled())
         self.assertEqual(window.analysis_views.currentIndex(), 1)
+        self.assertIn("COM4", window.source_status_label.text())
 
     def test_file_analysis_opens_review_after_success(self):
         window = ECGDesktopApp(DiscoveryResult((), ()))
@@ -91,9 +97,26 @@ class TestStartupFlow(unittest.TestCase):
         window = ECGDesktopApp(DiscoveryResult(("COM4", "COM5"), ()))
         self.addCleanup(window.close)
         self.assertFalse(window.switch_usb_action.isEnabled())
-        self.assertIn("Multiple", window.usb_device_label.text())
+        self.assertIn("Multiple", window.source_status_label.text())
         window._usb_discovery_result(DiscoveryResult(("COM5",), ()))
         self.assertEqual(window.input_mode, "USB Input")
+
+    def test_discovery_failure_is_visible_and_resets_usb_mode(self):
+        window = ECGDesktopApp(DiscoveryResult(("COM4",), ()))
+        self.addCleanup(window.close)
+        window._usb_discovery_failed("COM4: port busy")
+        self.assertIn("COM4: port busy", window.source_status_label.text())
+        self.assertEqual(window.input_mode, "File Analysis")
+        self.assertIs(window.analysis_views.currentWidget(), window.file_analysis_message)
+
+    def test_port_errors_remain_visible_with_open_file(self):
+        window = ECGDesktopApp(DiscoveryResult((), ()))
+        self.addCleanup(window.close)
+        with patch.object(QFileDialog, "getOpenFileName", return_value=("/tmp/example.csv", "")):
+            window._select_ecg_file()
+        window._usb_discovery_result(DiscoveryResult((), ("COM4: port busy",)))
+        self.assertIn("COM4: port busy", window.source_status_label.text())
+        self.assertIn("example.csv", window.source_status_label.text())
 
     def test_startup_result_and_failure_messages(self):
         dialog = StartupDiscoveryDialog()
