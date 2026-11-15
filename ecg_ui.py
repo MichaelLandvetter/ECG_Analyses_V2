@@ -44,7 +44,7 @@ from ecg_usb_stream import ECGSerialStream, USBStreamError
 
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
-USB_PREVIEW_FILTER_CONTEXT_SECONDS = 1
+USB_PREVIEW_FILTER_CONTEXT_SECONDS = 3
 
 try:
     from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
@@ -945,7 +945,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.rolling_window_input = QLineEdit(str(DEFAULT_ROLLING_WINDOW_SECONDS))
             rolling_window_layout.addRow("Window length (s):", self.rolling_window_input)
             rolling_window_layout.addRow(
-                QLabel("USB preview is delayed by approximately 1 second to reduce filter edge effects."),
+                QLabel(
+                    f"USB preview is delayed by approximately {USB_PREVIEW_FILTER_CONTEXT_SECONDS} seconds "
+                    "to reduce filter edge effects."
+                ),
             )
             parent.addWidget(rolling_window_group)
 
@@ -1518,7 +1521,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.ecg_plot.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0))
             self.ecg_plot.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2))
             if self.input_mode == "USB Input" and results is None:
-                self.ecg_plot.setTitle("Raw ECG + Filtered ECG live preview (about 1 s delay)")
+                self.ecg_plot.setTitle(
+                    f"Raw ECG + Filtered ECG live preview (about {USB_PREVIEW_FILTER_CONTEXT_SECONDS} s delay)"
+                )
             else:
                 self.ecg_plot.setTitle("Full ECG: raw, filtered, and R-peaks" if results else "Raw ECG + Filtered ECG preview")
 
