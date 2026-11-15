@@ -599,6 +599,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             self.selected_file: str | None = None
             self.usb_ports = initial_usb_result.ports if initial_usb_result else ()
+            self.usb_status_message: str | None = None
             self.input_mode = "USB Input" if len(self.usb_ports) == 1 else "File Analysis"
             self.acquisition_running = False
             self.usb_acquisition_state = "idle"
@@ -646,11 +647,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             )
 
             self.source_status_label = QLabel()
+            self.source_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.source_status_label.setWordWrap(True)
             self.root_layout.addWidget(self.source_status_label)
-            self.usb_device_label = QLabel("USB device: not checked")
-            self.usb_device_label.setWordWrap(True)
-            self.root_layout.addWidget(self.usb_device_label)
             controls_container = QWidget()
             controls_layout = QGridLayout(controls_container)
             controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -680,7 +679,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
         def _search_usb_devices(self, manual_port: str | None = None) -> None:
             if self._usb_discovery is not None:
                 return
-            self.usb_device_label.setText("USB device: searching...")
+            self.usb_status_message = "Searching for USB unit..."
+            self._on_source_mode_changed()
             self.usb_search_button.setEnabled(False)
             self.usb_manual_button.setEnabled(False)
             worker = USBDiscoveryThread(manual_port if isinstance(manual_port, str) else None)
@@ -709,22 +709,26 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
         def _usb_discovery_result(self, result: DiscoveryResult) -> None:
             self.usb_ports = result.ports
-            if len(result.ports) == 1:
-                text = f"USB unit identified: {result.ports[0]} (ADS1115 initialized; detection is a snapshot)"
-            elif result.ports:
-                text = "Multiple USB units found: " + ", ".join(result.ports) + ". Check a port individually."
+            if len(result.ports) > 1:
+                self.usb_status_message = (
+                    "Multiple USB units found: " + ", ".join(result.ports) + ". Check a COM port individually."
+                )
             else:
-                text = "USB unit not found. Search again or check a COM port; File Analysis remains available."
+                self.usb_status_message = None
             if result.errors:
-                text += " Port errors: " + "; ".join(result.errors)
-            self.usb_device_label.setText(text)
+                self.usb_status_message = (
+                    (self.usb_status_message + " " if self.usb_status_message else "")
+                    + "USB port errors: " + "; ".join(result.errors)
+                )
             if not self.selected_file and self.usb_acquisition_state == "idle":
                 self.input_mode = "USB Input" if len(result.ports) == 1 else "File Analysis"
             self._on_source_mode_changed()
 
         def _usb_discovery_failed(self, message: str) -> None:
             self.usb_ports = ()
-            self.usb_device_label.setText("USB detection: " + message)
+            self.usb_status_message = "USB detection: " + message
+            if not self.selected_file and self.usb_acquisition_state == "idle":
+                self.input_mode = "File Analysis"
             self._on_source_mode_changed()
 
         def _usb_discovery_finished(self) -> None:
@@ -926,12 +930,25 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             is_file_mode = self.input_mode == "File Analysis"
             self._apply_analysis_layout(is_file_mode=is_file_mode)
 
-            if not is_file_mode:
-                self.source_status_label.setText("Active source: USB input — live acquisition is not yet available.")
-            elif self.selected_file:
-                self.source_status_label.setText(f"Active source: ECG file — {Path(self.selected_file).name}")
+            if self.usb_status_message:
+                status = self.usb_status_message
+                if is_file_mode and self.selected_file:
+                    status += f" Active file: {Path(self.selected_file).name}."
+            elif is_file_mode and self.selected_file:
+                status = f"File analysis: {Path(self.selected_file).name}"
+                if len(self.usb_ports) == 1:
+                    status += f" — USB unit detected on {self.usb_ports[0]}."
+            elif not is_file_mode and len(self.usb_ports) == 1:
+                status = (
+                    f"USB unit detected on {self.usb_ports[0]}; live acquisition is not yet available. "
+                    "For file analysis select File > Open ECG file."
+                )
             else:
-                self.source_status_label.setText("Active source: none — open an ECG file or connect a USB unit.")
+                status = "No acquisition USB link found. File analysis available."
+            self.source_status_label.setText(status)
+            self.source_status_label.setToolTip(
+                "USB detection is a snapshot; the port is released after scanning."
+            )
             self._update_action_controls()
 
         def _update_action_controls(self) -> None:
