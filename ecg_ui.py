@@ -330,6 +330,12 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 worker.deleteLater()
             self.retry_button.setEnabled(True)
             self.continue_button.setEnabled(True)
+            if len(self.result.ports) == 1:
+                self.continue_button.setDefault(True)
+                self.continue_button.setFocus()
+            else:
+                self.retry_button.setDefault(True)
+                self.retry_button.setFocus()
 
         def done(self, result: int) -> None:
             if self.worker is not None:
