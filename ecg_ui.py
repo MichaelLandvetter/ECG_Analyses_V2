@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +39,8 @@ from ecg_config import (
 )
 from ecg_report import save_structured_reports
 from ecg_usb_discovery import DiscoveryResult, discover_devices
+from ecg_usb_recording import USBRecording
+from ecg_usb_stream import ECGSerialStream, USBStreamError
 
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
@@ -234,6 +239,69 @@ def _should_process_usb_stream_tick(
 
 
 if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
+    class USBStreamThread(QThread):
+        """Read and record ECG data without blocking the GUI."""
+
+        samples_received = pyqtSignal(object)
+        connected = pyqtSignal()
+        outcome = pyqtSignal(str)
+
+        def __init__(self, port: str, recording: USBRecording) -> None:
+            super().__init__()
+            self.port = port
+            self.recording = recording
+            self._lock = threading.Lock()
+            self._paused = False
+            self._resume_pending = False
+
+        def set_paused(self, paused: bool) -> None:
+            with self._lock:
+                if self._paused and not paused:
+                    self._resume_pending = True
+                self._paused = paused
+
+        def run(self) -> None:
+            stream = None
+            error = ""
+            try:
+                import serial
+
+                stream = ECGSerialStream(self.port, serial.Serial)
+                stream.identify()
+                self.connected.emit()
+                last_flush = time.monotonic()
+                while not self.isInterruptionRequested():
+                    samples = stream.read_samples()
+                    accepted = []
+                    with self._lock:
+                        if not self._paused:
+                            if self._resume_pending and samples:
+                                self.recording.resume()
+                                self._resume_pending = False
+                            for sample in samples:
+                                self.recording.append(sample)
+                                if self.recording.discontinuities:
+                                    raise USBStreamError("A gap or timing discontinuity occurred in the USB stream.")
+                                accepted.append(sample.raw_ecg)
+                    if accepted:
+                        self.samples_received.emit(accepted)
+                    if time.monotonic() - last_flush >= 0.5:
+                        self.recording.flush()
+                        last_flush = time.monotonic()
+            except (ImportError, OSError, ValueError, USBStreamError) as exc:
+                error = str(exc)
+            finally:
+                try:
+                    if stream is not None:
+                        stream.close()
+                except OSError as exc:
+                    error = f"{error}; serial close failed: {exc}" if error else f"Serial close failed: {exc}"
+                try:
+                    self.recording.close()
+                except OSError as exc:
+                    error = f"{error}; recording close failed: {exc}" if error else f"Recording close failed: {exc}"
+                self.outcome.emit(error)
+
     class USBDiscoveryThread(QThread):
         """Perform bounded serial probes without blocking the GUI."""
 
@@ -609,10 +677,11 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.input_mode = "USB Input" if len(self.usb_ports) == 1 else "File Analysis"
             self.acquisition_running = False
             self.usb_acquisition_state = "idle"
-            self.usb_session_chunks: list[np.ndarray] = []
+            self.usb_preview: deque[float] = deque()
             self.usb_session_settings: dict[str, Any] | None = None
-            self.usb_sample_cursor: int = 0
-            self.usb_rng = np.random.default_rng()
+            self.usb_worker: USBStreamThread | None = None
+            self.usb_recording: USBRecording | None = None
+            self.usb_stop_requested = False
             self.latest_report_input_file: str | None = None
             self.latest_results: dict[str, Any] | None = None
             self.latest_source = ""
@@ -627,7 +696,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             self._build_layout()
             self.usb_timer = QTimer(self)
-            self.usb_timer.setInterval(500)
+            self.usb_timer.setInterval(200)
             self.usb_timer.timeout.connect(self._on_usb_stream_tick)
             self._apply_processing_settings(self.processing_settings)
             self._set_initial_plots()
@@ -683,7 +752,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.root_layout.addWidget(self.status_label)
 
         def _search_usb_devices(self, manual_port: str | None = None) -> None:
-            if self._usb_discovery is not None:
+            if self._usb_discovery is not None or self.usb_worker is not None:
                 return
             self.usb_status_message = "Searching for USB unit..."
             self._on_source_mode_changed()
@@ -697,6 +766,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             worker.start()
 
         def _select_usb_port(self) -> None:
+            if self.usb_worker is not None:
+                return
             try:
                 from serial.tools import list_ports
                 ports = [port.device for port in list_ports.comports()]
@@ -746,6 +817,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.usb_manual_button.setEnabled(True)
 
         def closeEvent(self, event: Any) -> None:
+            if self.usb_worker is not None:
+                self._show_info("USB acquisition", "End the acquisition before closing the application.")
+                event.ignore()
+                return
             if self._usb_discovery is not None:
                 self._usb_discovery.requestInterruption()
                 self._usb_discovery.wait()
@@ -811,9 +886,9 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.detailed_review_button.clicked.connect(self._open_detailed_review)
             layout.addWidget(self.detailed_review_button, 1, 1)
 
-            reset_button = QPushButton("Reset")
-            reset_button.clicked.connect(self._reset_ui)
-            layout.addWidget(reset_button, 1, 2)
+            self.reset_button = QPushButton("Reset")
+            self.reset_button.clicked.connect(self._reset_ui)
+            layout.addWidget(self.reset_button, 1, 2)
 
             parent.addWidget(frame, 0, column)
 
@@ -946,7 +1021,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     status += f" — USB unit detected on {self.usb_ports[0]}."
             elif not is_file_mode and len(self.usb_ports) == 1:
                 status = (
-                    f"USB unit detected on {self.usb_ports[0]}; live acquisition is not yet available. "
+                    f"USB unit detected on {self.usb_ports[0]}; ready for acquisition. "
                     "For file analysis select File > Open ECG file."
                 )
             else:
@@ -965,7 +1040,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 usb_acquisition_state=self.usb_acquisition_state,
                 latest_result_mode=self.latest_result_mode,
                 has_file=self.selected_file is not None,
-                usb_stream_available=False,
+                usb_stream_available=len(self.usb_ports) == 1 and self._usb_discovery is None,
             )
             self._apply_analysis_layout(is_file_mode=not controls["show_live_plots"])
             self.start_button.setText(str(controls["start_text"]))
@@ -977,9 +1052,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.detailed_review_button.setEnabled(bool(controls["review_enabled"]))
             self.switch_usb_action.setEnabled(len(self.usb_ports) == 1 and not self.acquisition_running)
             self.open_file_action.setEnabled(not self.acquisition_running)
-            self.start_button.setToolTip(
-                "Real USB acquisition is not yet integrated." if not is_file_mode else ""
-            )
+            self.reset_button.setEnabled(self.usb_worker is None)
+            self.usb_search_button.setEnabled(self.usb_worker is None and self._usb_discovery is None)
+            self.usb_manual_button.setEnabled(self.usb_worker is None and self._usb_discovery is None)
+            self.start_button.setToolTip("")
 
         def _switch_to_usb(self) -> None:
             if len(self.usb_ports) != 1 or self.acquisition_running:
@@ -987,7 +1063,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.input_mode = "USB Input"
             self._set_initial_plots()
             self._on_source_mode_changed()
-            self._set_status("USB unit selected. Real USB acquisition is not yet integrated.")
+            self._set_status("USB unit selected. Click Start acquisition to choose a recording file.")
 
         def _select_ecg_file(self) -> None:
             if self.acquisition_running:
@@ -1065,7 +1141,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
         def _start_or_rerun(self) -> None:
             if self.input_mode == "USB Input":
-                self._show_info("USB Input", "Real USB acquisition is not yet integrated.")
+                self._start_usb_acquisition()
                 return
             self._start_file_analysis()
 
@@ -1122,21 +1198,36 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self._open_detailed_review()
 
         def _start_usb_acquisition(self) -> None:
-            if self.usb_acquisition_state in {"running", "paused"}:
-                self._set_status("USB acquisition already started.")
+            if self.usb_worker is not None or len(self.usb_ports) != 1 or self._usb_discovery is not None:
                 return
 
             try:
                 settings = self._get_current_processing_settings()
+                if settings["sampling_rate_hz"] != 250:
+                    raise ValueError("The USB device samples at 250 Hz. Set sampling rate to 250 Hz.")
             except ValueError as exc:
                 self._show_error("Invalid processing settings", str(exc))
                 return
 
-            self.usb_session_chunks = []
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save USB recording", f"usb_ecg_{datetime.now():%Y%m%d_%H%M%S}.csv",
+                "CSV files (*.csv)",
+            )
+            if not path:
+                return
+            if not path.lower().endswith(".csv"):
+                path += ".csv"
+            try:
+                recording = USBRecording(Path(path))
+            except OSError as exc:
+                self._show_error("USB recording error", f"Could not create recording: {exc}")
+                return
+
+            self.usb_recording = recording
+            self.usb_preview = deque(maxlen=settings["sampling_rate_hz"] * settings["rolling_window_seconds"])
             self.usb_session_settings = settings
-            self.usb_sample_cursor = 0
-            self.usb_rng = np.random.default_rng()
-            self.usb_acquisition_state = "running"
+            self.usb_stop_requested = False
+            self.usb_acquisition_state = "connecting"
             self.acquisition_running = True
             self.latest_results = None
             self.latest_report_input_file = None
@@ -1144,56 +1235,84 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_result_mode = None
             self.latest_raw_signal = None
             self._set_initial_plots()
-            self._append_usb_chunk(
-                sampling_rate=settings["sampling_rate_hz"],
-            )
-            self.usb_timer.start()
-            self._set_status("Simulated USB acquisition started; this is not data from the connected device.")
-            self._refresh_usb_preview_plot()
+            worker = USBStreamThread(self.usb_ports[0], recording)
+            self.usb_worker = worker
+            worker.connected.connect(self._usb_connected)
+            worker.samples_received.connect(self._usb_samples_received)
+            worker.outcome.connect(self._usb_stream_outcome)
+            worker.start()
+            self._set_status(f"Connecting to {self.usb_ports[0]}...")
             self._update_action_controls()
 
+        def _usb_connected(self) -> None:
+            if self.usb_acquisition_state != "connecting":
+                return
+            self.usb_acquisition_state = "running"
+            self.usb_timer.start()
+            self._set_status(f"Recording USB ECG to {self.usb_recording.path}")
+            self._update_action_controls()
+
+        def _usb_samples_received(self, values: list[int]) -> None:
+            if self.usb_worker is not None:
+                self.usb_preview.extend(values)
+
         def _pause_or_resume_usb(self) -> None:
+            if self.usb_worker is None:
+                return
             if self.usb_acquisition_state == "running":
+                self.usb_worker.set_paused(True)
                 self.usb_acquisition_state = "paused"
-                self.acquisition_running = False
                 self.usb_timer.stop()
-                self._set_status("Simulated USB acquisition paused.")
+                self._set_status("USB recording paused; paused time will be excluded.")
                 self._update_action_controls()
                 return
 
             if self.usb_acquisition_state == "paused":
-                if self.usb_session_settings is None:
-                    self._show_error("USB Input", "USB session settings are missing. Reset and start again.")
-                    return
+                self.usb_worker.set_paused(False)
                 self.usb_acquisition_state = "running"
-                self.acquisition_running = True
                 self.usb_timer.start()
-                self._set_status("Simulated USB acquisition resumed.")
-                self._refresh_usb_preview_plot()
+                self._set_status("USB recording resumed.")
                 self._update_action_controls()
 
         def _end_usb_session(self) -> None:
-            if self.usb_acquisition_state not in {"running", "paused"}:
-                self._set_status("No active USB acquisition to end.")
+            if self.usb_worker is None or self.usb_acquisition_state not in {"running", "paused"}:
                 return
-
-            previous_state = self.usb_acquisition_state
-            session_file: Path | None = None
-            self.acquisition_running = True
+            self.usb_stop_requested = True
             self.usb_acquisition_state = "ending"
             self.usb_timer.stop()
+            self.usb_worker.requestInterruption()
+            self._set_status("Closing USB recording...")
             self._update_action_controls()
-            self._set_status("Finalizing USB session and running analysis...")
-            QApplication.processEvents()
 
+        def _usb_stream_outcome(self, error: str) -> None:
+            worker = self.usb_worker
+            if worker is None:
+                return
+            worker.wait()
+            self.usb_worker = None
+            worker.deleteLater()
+            self.usb_timer.stop()
+            recording = self.usb_recording
+            settings = self.usb_session_settings
+            requested = self.usb_stop_requested
+            self.usb_acquisition_state = "idle"
+            self.acquisition_running = False
+            self._update_action_controls()
+            if recording is None or settings is None:
+                self._show_error("USB recording error", "Recording state is missing.")
+                return
+            session_file = recording.path
+            if error or not requested:
+                message = error or "The USB stream stopped unexpectedly."
+                self.usb_ports = ()
+                self.usb_status_message = "USB recording stopped. Search for the unit before starting again."
+                self._on_source_mode_changed()
+                self._set_status(f"USB recording stopped. Saved to {session_file}; analysis not run.")
+                self._show_error("USB recording stopped", f"{message}\n\nRecording preserved at:\n{session_file}")
+                return
             try:
-                if self.usb_session_settings is None:
-                    raise ValueError("USB session settings are missing. Reset and start a new session.")
-                settings = self.usb_session_settings
-                raw_signal = self._get_usb_session_signal()
-                if raw_signal.size < 3:
+                if recording.sample_count < 3:
                     raise ValueError("USB session is too short. Acquire more data before ending.")
-                session_file = self._save_usb_session_to_file(raw_signal)
                 reloaded_signal, _reloaded_source = acquire_ecg_signal(
                     input_file=str(session_file),
                     sampling_rate=settings["sampling_rate_hz"],
@@ -1205,34 +1324,13 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     source=source,
                     report_input_file=str(session_file),
                     settings=settings,
-                    completion_status="USB session ended. Analysis results are ready in Analysis View.",
+                    completion_status="USB session ended. Opening pre-report.",
                     result_mode="usb",
                 )
-                self.usb_acquisition_state = "idle"
-                self.acquisition_running = False
-                self.usb_session_chunks = []
-                self.usb_session_settings = None
-                self.usb_sample_cursor = 0
                 self._open_detailed_review()
             except (NeuroKit2UnavailableError, RuntimeError, ValueError, OSError) as exc:
-                if session_file is not None:
-                    self.usb_acquisition_state = "idle"
-                    self.usb_session_chunks = []
-                    self.usb_session_settings = None
-                    self.usb_sample_cursor = 0
-                    self.latest_results = None
-                    self.latest_source = ""
-                    self.latest_result_mode = None
-                    self.latest_raw_signal = None
-                    self.latest_report_input_file = None
-                    self._set_status(f"USB capture saved to {session_file}, but analysis failed: {exc}")
-                else:
-                    self.usb_acquisition_state = previous_state
-                    if previous_state == "running":
-                        self.usb_timer.start()
-                    self._set_status(f"USB processing failed: {exc}")
-                self.acquisition_running = False
-                self._show_error("USB processing error", str(exc))
+                self._set_status(f"USB capture saved to {session_file}, but analysis failed: {exc}")
+                self._show_error("USB processing error", f"{exc}\n\nRecording preserved at:\n{session_file}")
             finally:
                 self._update_action_controls()
 
@@ -1242,34 +1340,14 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 usb_session_settings=self.usb_session_settings,
             ):
                 return
-            self._append_usb_chunk(sampling_rate=self.usb_session_settings["sampling_rate_hz"])
             self._refresh_usb_preview_plot()
-
-        def _generate_usb_chunk(self, sampling_rate: int) -> np.ndarray:
-            chunk_size = max(5, int(round(0.5 * sampling_rate)))
-            sample_index = np.arange(self.usb_sample_cursor, self.usb_sample_cursor + chunk_size, dtype=float)
-            time_axis = sample_index / float(sampling_rate)
-            self.usb_sample_cursor += chunk_size
-            baseline = 0.8 * np.sin(2 * np.pi * 1.2 * time_axis)
-            high_freq = 0.08 * np.sin(2 * np.pi * 23.0 * time_axis)
-            noise = 0.03 * self.usb_rng.standard_normal(chunk_size)
-            return baseline + high_freq + noise
-
-        def _append_usb_chunk(self, sampling_rate: int) -> None:
-            chunk = self._generate_usb_chunk(sampling_rate=sampling_rate)
-            self.usb_session_chunks.append(np.asarray(chunk, dtype=float))
-
-        def _get_usb_session_signal(self) -> np.ndarray:
-            if not self.usb_session_chunks:
-                return np.array([], dtype=float)
-            return np.concatenate(self.usb_session_chunks)
 
         def _refresh_usb_preview_plot(self) -> None:
             settings = self.usb_session_settings
             if settings is None:
                 return
 
-            raw_signal = self._get_usb_session_signal()
+            raw_signal = np.asarray(self.usb_preview, dtype=float)
             if raw_signal.size < 3:
                 return
 
@@ -1289,7 +1367,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     high_cut_hz=settings["filter_high_cut_hz"],
                     powerline_frequency_hz=settings["powerline_frequency_hz"],
                 )
-            except (NeuroKit2UnavailableError, RuntimeError, ValueError):
+            except (NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
+                self._set_status(f"Live filter unavailable: {exc}")
                 filtered_signal = preview_raw.copy()
 
             preview_filtered = filtered_signal
@@ -1305,14 +1384,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 time_offset_seconds=float(preview_start / settings["sampling_rate_hz"]),
                 live_heart_rate=live_hr,
             )
-
-        def _save_usb_session_to_file(self, signal: np.ndarray) -> Path:
-            session_dir = Path.cwd() / "USB_Sessions"
-            session_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            session_file = session_dir / f"usb_session_{timestamp}.csv"
-            np.savetxt(session_file, signal, delimiter=",")
-            return session_file
 
         def _complete_analysis_run(
             self,
@@ -1351,12 +1422,15 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.tabs.setCurrentIndex(0)
 
         def _reset_ui(self) -> None:
+            if self.usb_worker is not None:
+                self._show_info("USB acquisition", "End the acquisition before resetting.")
+                return
             self.acquisition_running = False
             self.usb_acquisition_state = "idle"
             self.usb_timer.stop()
-            self.usb_session_chunks = []
+            self.usb_preview.clear()
             self.usb_session_settings = None
-            self.usb_sample_cursor = 0
+            self.usb_recording = None
             self.latest_results = None
             self.latest_source = ""
             self.latest_result_mode = None

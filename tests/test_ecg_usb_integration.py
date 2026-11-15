@@ -1,0 +1,115 @@
+"""Exercise the desktop recording lifecycle using a simulated serial device."""
+
+import os
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import numpy as np
+
+try:
+    from PyQt6.QtWidgets import QApplication, QFileDialog
+    from ecg_ui import ECGDesktopApp
+    from ecg_usb_discovery import DiscoveryResult
+    from ecg_usb_stream import USBStreamError
+    from tools.usb_ecg_stream_utils import StreamSample
+except ImportError:
+    QApplication = None
+
+
+class FakeStream:
+    failure = None
+
+    def __init__(self, port, serial_factory):
+        self.index = 0
+
+    def identify(self):
+        pass
+
+    def read_samples(self):
+        time.sleep(0.005)
+        self.index += 1
+        if self.failure == "disconnect" and self.index == 10:
+            raise USBStreamError("device disconnected")
+        index = self.index + (1 if self.failure == "gap" and self.index >= 10 else 0)
+        return [StreamSample(index * 4, index, 10000 + index)]
+
+    def close(self):
+        pass
+
+
+@unittest.skipIf(QApplication is None, "Desktop UI dependencies are not installed")
+class TestUSBIntegration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def wait_for(self, condition):
+        deadline = time.monotonic() + 4
+        while not condition() and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.app.processEvents()
+        self.assertTrue(condition(), "Timed out waiting for acquisition")
+
+    def test_record_pause_resume_end_and_analyse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.csv"
+            window = ECGDesktopApp(DiscoveryResult(("COM4",), ()))
+            with (
+                patch("ecg_ui.ECGSerialStream", FakeStream),
+                patch.object(QFileDialog, "getSaveFileName", return_value=(str(path), "")),
+                patch.object(window, "_complete_analysis_run") as analysis,
+                patch.object(window, "_open_detailed_review") as review,
+            ):
+                window._start_usb_acquisition()
+                self.wait_for(lambda: window.usb_recording.sample_count >= 5)
+                self.wait_for(lambda: window.usb_acquisition_state == "running")
+                window._pause_or_resume_usb()
+                count = window.usb_recording.sample_count
+                time.sleep(0.08)
+                self.app.processEvents()
+                self.assertEqual(window.usb_recording.sample_count, count)
+                self.assertFalse(window.open_file_action.isEnabled())
+                window._pause_or_resume_usb()
+                self.wait_for(lambda: window.usb_recording.sample_count > count + 5)
+                window._end_usb_session()
+                self.wait_for(lambda: window.usb_worker is None)
+                analysis.assert_called_once()
+                review.assert_called_once()
+                self.assertIn("acquisition resumed after pause", path.read_text())
+                np.testing.assert_array_equal(
+                    analysis.call_args.kwargs["raw_signal"], np.loadtxt(path, delimiter=",")[:, 0]
+                )
+            window.close()
+
+    def test_discontinuity_and_disconnect_preserve_without_analysis(self):
+        for failure in ("gap", "disconnect"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "capture.csv"
+                window = ECGDesktopApp(DiscoveryResult(("COM4",), ()))
+                FakeStream.failure = failure
+                try:
+                    with (
+                        patch("ecg_ui.ECGSerialStream", FakeStream),
+                        patch.object(QFileDialog, "getSaveFileName", return_value=(str(path), "")),
+                        patch.object(window, "_complete_analysis_run") as analysis,
+                        patch.object(window, "_show_error") as error,
+                    ):
+                        window._start_usb_acquisition()
+                        self.wait_for(lambda: window.usb_worker is None)
+                        self.assertTrue(path.exists())
+                        self.assertGreater(path.stat().st_size, 0)
+                        analysis.assert_not_called()
+                        self.assertIn("preserved", error.call_args.args[1])
+                finally:
+                    FakeStream.failure = None
+                    window.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

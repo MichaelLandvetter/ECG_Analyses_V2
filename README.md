@@ -51,7 +51,14 @@ On startup, the app checks serial ports identified as ESP32/Espressif for VER_V-
 
 Opening a file selects file analysis even when a unit is detected. **File > Switch to USB input** returns to the USB source if exactly one unit was identified. If multiple units are detected, use **Check a COM port** to select one.
 
-The USB view contains raw/filtered ECG and heart-rate plots. Beat snippets are shown in the pre-report after analysis. **Real USB acquisition is not yet integrated into the main app.** Start acquisition is disabled, so simulated data cannot be mistaken for real device data. Continue to use the standalone USB Stream Tester for live acquisition.
+The USB view contains raw/filtered ECG and heart-rate plots. Beat snippets are shown in the pre-report after analysis. To acquire from a detected unit:
+
+1. Select **File > Switch to USB input** if necessary, set the sampling rate to **250 Hz** in ECG Processing Settings, and click **Start acquisition**.
+2. Choose a new CSV file for the recording. The app does not overwrite existing files.
+3. Use **Pause** and **Resume** as needed; paused time is excluded from the recorded samples.
+4. Click **End** to close the recording, analyse it and open the pre-report.
+
+The CSV stores raw ADC counts, device timestamps and sample indices. The recording includes comment lines marking resumed segments; analysis treats the recorded samples as continuous, so results around a pause boundary may be affected. A detected sample gap, invalid serial data or a disconnect stops recording, preserves the CSV and skips automatic analysis. Rescan the unit before starting again. The AD8232 leads-off behaviour remains as in the firmware: it streams zero, which is not distinguished from a valid zero sample.
 
 ## USB Stream Tester
 
@@ -141,7 +148,7 @@ When **Save Reports** is used after File Analysis or USB End analysis:
 
 1. A `Reports/` folder is created next to the analysis input file if it does not already exist.
    - File Analysis input file: user-selected ECG file
-   - USB session input file: generated capture under `<app_working_directory>/USB_Sessions/usb_session_<YYYYMMDD_HHMMSS_microseconds>.csv`
+   - USB session input file: the CSV selected when starting acquisition
 2. A per-run folder is created inside `Reports/` using:
 
    ```text
@@ -159,7 +166,7 @@ A text summary report is also written in the same folder.
 
 ## Current scope
 
-- **Implemented now:** File analysis with a pre-report review, USB device identification, settings save/load, and CSV report export. Live USB capture in the main app is not yet implemented.
+- **Implemented now:** File analysis with pre-report review, USB device identification and live capture, settings save/load, and CSV report export.
 
 ## Project structure
 
