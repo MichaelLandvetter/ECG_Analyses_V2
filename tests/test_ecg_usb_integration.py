@@ -70,7 +70,7 @@ class TestUSBIntegration(unittest.TestCase):
                 patch.object(window, "_open_detailed_review") as review,
             ):
                 window._start_usb_acquisition()
-                self.assertEqual(window.usb_preview.maxlen, 250 * (window.usb_session_settings["rolling_window_seconds"] + 2))
+                self.assertEqual(window.usb_preview.maxlen, 250 * (window.usb_session_settings["rolling_window_seconds"] + 6))
                 self.wait_for(lambda: window.usb_recording.sample_count >= 5)
                 self.wait_for(lambda: window.usb_acquisition_state == "running")
                 window._pause_or_resume_usb()
@@ -107,20 +107,20 @@ class TestUSBIntegration(unittest.TestCase):
                 patch("ecg_ui.estimate_live_heart_rate_trace", side_effect=lambda signal, **kwargs: signal + 20) as hr,
                 patch.object(window, "_update_preview_plots") as plot,
             ):
-                window.usb_preview = deque(range(252), maxlen=3000)
+                window.usb_preview = deque(range(752), maxlen=4000)
                 window._refresh_usb_preview_plot()
                 clean.assert_not_called()
                 plot.assert_not_called()
 
-                window.usb_preview = deque(range(3000), maxlen=3000)
+                window.usb_preview = deque(range(4000), maxlen=4000)
                 window._refresh_usb_preview_plot()
-                np.testing.assert_array_equal(clean.call_args.kwargs["signal"], np.arange(3000))
-                np.testing.assert_array_equal(plot.call_args.kwargs["raw_signal"], np.arange(250, 2750))
-                np.testing.assert_array_equal(plot.call_args.kwargs["filtered_signal"], np.arange(250, 2750) + 10)
-                np.testing.assert_array_equal(hr.call_args.kwargs["signal"], np.arange(250, 2750) + 10)
-                np.testing.assert_array_equal(plot.call_args.kwargs["live_heart_rate"], np.arange(250, 2750) + 30)
+                np.testing.assert_array_equal(clean.call_args.kwargs["signal"], np.arange(4000))
+                np.testing.assert_array_equal(plot.call_args.kwargs["raw_signal"], np.arange(750, 3250))
+                np.testing.assert_array_equal(plot.call_args.kwargs["filtered_signal"], np.arange(750, 3250) + 10)
+                np.testing.assert_array_equal(hr.call_args.kwargs["signal"], np.arange(750, 3250) + 10)
+                np.testing.assert_array_equal(plot.call_args.kwargs["live_heart_rate"], np.arange(750, 3250) + 30)
 
-                window.usb_preview = deque(range(750), maxlen=3000)
+                window.usb_preview = deque(range(1250), maxlen=4000)
                 window._refresh_usb_preview_plot()
                 np.testing.assert_array_equal(plot.call_args.kwargs["raw_signal"], np.arange(500))
                 np.testing.assert_array_equal(plot.call_args.kwargs["filtered_signal"], np.arange(500) + 10)
@@ -137,7 +137,7 @@ class TestUSBIntegration(unittest.TestCase):
             "filter_high_cut_hz": 40.0,
             "powerline_frequency_hz": 50.0,
         }
-        window.usb_preview = deque(range(750), maxlen=3000)
+        window.usb_preview = deque(range(1250), maxlen=4000)
         try:
             with (
                 patch("ecg_ui.clean_ecg_signal", side_effect=RuntimeError("test error")),
@@ -161,14 +161,14 @@ class TestUSBIntegration(unittest.TestCase):
             "filter_high_cut_hz": 40.0,
             "powerline_frequency_hz": 50.0,
         }
-        time_axis = np.arange(1250) / 250
+        time_axis = np.arange(2250) / 250
         raw = 10000 + 1000 * np.sin(2 * np.pi * time_axis) + 100 * np.sin(2 * np.pi * 50 * time_axis)
         try:
             try:
                 filtered = clean_ecg_signal(raw, 250, filter_mode="NeuroKit2 ecg_clean")
             except NeuroKit2UnavailableError:
                 self.skipTest("NeuroKit2 not installed in current environment")
-            window.usb_preview = deque(raw, maxlen=1250)
+            window.usb_preview = deque(raw, maxlen=2250)
             window._refresh_usb_preview_plot()
             self.app.processEvents()
             raw_curve, filtered_curve = window.ecg_plot.listDataItems()
@@ -176,8 +176,8 @@ class TestUSBIntegration(unittest.TestCase):
             x_filtered, y_filtered = filtered_curve.getData()
             np.testing.assert_array_equal(x_raw, np.arange(750) / 250)
             np.testing.assert_array_equal(x_filtered, x_raw)
-            np.testing.assert_allclose(y_raw, raw[250:1000])
-            np.testing.assert_allclose(y_filtered, filtered[250:1000])
+            np.testing.assert_allclose(y_raw, raw[750:1500])
+            np.testing.assert_allclose(y_filtered, filtered[750:1500])
         finally:
             window.close()
 
