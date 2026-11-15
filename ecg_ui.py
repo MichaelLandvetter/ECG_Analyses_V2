@@ -496,7 +496,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             )
 
             self.ecg_panel = ReviewPlotPanel("Full ECG: raw, filtered, and R-peaks", self._plot_ecg_overview, self)
-            self.hr_panel = ReviewPlotPanel("Heart-rate over full duration", self._plot_heart_rate, self)
+            self.hr_panel = ReviewPlotPanel("Beat-to-beat heart rate", self._plot_heart_rate, self)
             self.beat_panel = ReviewPlotPanel("Beat snippets with average template overlay", self._plot_beats, self)
 
             root_layout.addWidget(self.ecg_panel)
@@ -575,8 +575,11 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             plot_widget.setLabel("bottom", "Time (s)")
             plot_widget.setLabel("left", "Heart rate (BPM)")
-            plot_widget.setTitle(self.hr_panel.title if hasattr(self, "hr_panel") else "Heart rate")
-            plot_widget.plot(time_axis, heart_rate, pen=pg.mkPen("#8172B3", width=1.2))
+            plot_widget.setTitle(self.hr_panel.title if hasattr(self, "hr_panel") else "Beat-to-beat heart rate")
+            if time_axis.size == heart_rate.size and time_axis.size:
+                step_time = np.repeat(time_axis, 2)[1:]
+                step_rate = np.repeat(heart_rate, 2)[:-1]
+                plot_widget.plot(step_time, step_rate, connect="finite", pen=pg.mkPen("#8172B3", width=1.2))
 
         def _plot_beats(self, plot_widget: pg.PlotWidget) -> None:
             artifacts = self.analysis_results.get("artifacts", {})

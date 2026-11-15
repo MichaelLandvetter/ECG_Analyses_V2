@@ -40,10 +40,12 @@ python ecg_main.py --cli --input-file path/to/ecg.csv --sampling-rate 250
 6. Click **Start analysis** to run the offline analysis. A processing dialog is shown while the full analysis is computed.
 7. Results open automatically in the **Pre-report** window:
    - full ECG raw + filtered + R-peaks
-   - full-duration heart-rate plot
+   - beat-to-beat heart-rate step plot
    - beat snippets with average template overlay plus per-beat P/Q/S/T markers from NeuroKit2 delineation
 8. Close the pre-report and use **Re-run Analysis** if processing settings are changed.
 9. Click **Save Reports** to export CSV report files, or **Open Pre-report** to review results again.
+
+The pre-report and `continuous_time_series.csv` use the unsmoothed rate `60 / RR interval` from detected, artifact-corrected R-peaks. Each rate starts at the second R-peak of its interval and is held until the next peak; the last rate is held to the end of the recording. Values before the second peak are unavailable. The summary mean is the time-weighted mean of the displayed trace. The live heart-rate preview remains a separately smoothed estimate.
 
 ## USB Input workflow
 

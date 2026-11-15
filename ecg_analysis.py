@@ -271,6 +271,28 @@ def estimate_live_heart_rate_trace(
     return hr_trace
 
 
+def beat_to_beat_heart_rate_trace(
+    r_peaks: Sequence[int] | np.ndarray,
+    sampling_rate: int,
+    num_samples: int,
+) -> np.ndarray:
+    """Hold each R–R-derived rate from the second peak until the next peak."""
+    if sampling_rate <= 0 or num_samples < 0:
+        raise ValueError("sampling_rate must be positive and num_samples non-negative")
+    peaks = np.asarray(r_peaks, dtype=int).flatten()
+    if peaks.size and (
+        np.any(peaks < 0) or np.any(peaks >= num_samples) or np.any(np.diff(peaks) <= 0)
+    ):
+        raise ValueError("R-peak indices must be strictly increasing and within the signal")
+
+    trace = np.full(num_samples, np.nan, dtype=float)
+    for index in range(1, peaks.size):
+        start = int(peaks[index])
+        end = int(peaks[index + 1]) if index + 1 < peaks.size else num_samples
+        trace[start:end] = 60.0 * sampling_rate / float(peaks[index] - peaks[index - 1])
+    return trace
+
+
 def detect_r_peaks(
     signal: Sequence[float] | np.ndarray,
     sampling_rate: int,
@@ -445,10 +467,7 @@ def analyze_ecg(
             correct_artifacts=True,
         )
         r_peaks = np.asarray(processing_info.get("ECG_R_Peaks", []), dtype=int)
-        heart_rate_trace = np.asarray(
-            nk.signal_rate(r_peaks, sampling_rate=sampling_rate, desired_length=signal_array.size),
-            dtype=float,
-        )
+        heart_rate_trace = beat_to_beat_heart_rate_trace(r_peaks, sampling_rate, signal_array.size)
     except Exception as exc:
         raise RuntimeError(f"NeuroKit2 failed to process ECG signal: {exc}") from exc
 
@@ -466,7 +485,8 @@ def analyze_ecg(
     rr_intervals_ms = (
         np.diff(r_peaks) / float(sampling_rate) * 1000.0 if r_peaks.size > 1 else np.array([], dtype=float)
     )
-    mean_heart_rate = _safe_float(np.nanmean(heart_rate_trace)) if heart_rate_trace.size else None
+    valid_heart_rate = heart_rate_trace[np.isfinite(heart_rate_trace)]
+    mean_heart_rate = _safe_float(np.mean(valid_heart_rate)) if valid_heart_rate.size else None
 
     hrv_rmssd = None
     hrv_sdnn = None
@@ -519,7 +539,7 @@ def analyze_ecg(
         "raw_signal": signal_array.astype(float).tolist(),
         "filtered_signal": filtered_signal.astype(float).tolist(),
         "r_peaks": r_peaks.tolist(),
-        "heart_rate_trace_bpm": heart_rate_trace.astype(float).tolist(),
+        "heart_rate_trace_bpm": [_safe_float(rate) for rate in heart_rate_trace],
         "beat_sample_offsets": template_data["beat_sample_offsets"],
         "beat_time_offsets_seconds": template_data["beat_time_offsets_seconds"],
         "beat_snippets": template_data["beat_snippets"],
