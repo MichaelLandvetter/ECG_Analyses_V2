@@ -45,6 +45,7 @@ from ecg_usb_stream import ECGSerialStream, USBStreamError
 PYQT6_IMPORT_ERROR: Exception | None = None
 PYQTGRAPH_IMPORT_ERROR: Exception | None = None
 USB_PREVIEW_FILTER_CONTEXT_SECONDS = 3
+USB_PREVIEW_UPDATE_INTERVAL_MS = 100
 
 try:
     from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
@@ -700,7 +701,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
             self._build_layout()
             self.usb_timer = QTimer(self)
-            self.usb_timer.setInterval(200)
+            self.usb_timer.setInterval(USB_PREVIEW_UPDATE_INTERVAL_MS)
             self.usb_timer.timeout.connect(self._on_usb_stream_tick)
             self._apply_processing_settings(self.processing_settings)
             self._set_initial_plots()
@@ -980,6 +981,10 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
         def _set_initial_plots(self) -> None:
             self.ecg_plot.clear()
             self.hr_plot.clear()
+            self._live_raw_curve = None
+            self._live_filtered_curve = None
+            self._live_hr_curve = None
+            self._live_hr_available = None
             self.ecg_plot.setTitle("Raw ECG + Filtered ECG preview")
             self.hr_plot.setTitle("Heart-rate plot")
 
@@ -1517,21 +1522,46 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
         ) -> None:
             time_axis = np.arange(raw_signal.size, dtype=float) / float(sampling_rate) + float(time_offset_seconds)
 
+            if self.input_mode == "USB Input" and results is None:
+                if self._live_raw_curve is None:
+                    self.ecg_plot.clear()
+                    self.hr_plot.clear()
+                    self._live_raw_curve = self.ecg_plot.plot(pen=pg.mkPen("#4C72B0", width=1.0))
+                    self._live_filtered_curve = self.ecg_plot.plot(pen=pg.mkPen("#55A868", width=1.2))
+                    self._live_hr_curve = self.hr_plot.plot(pen=pg.mkPen("#8172B3", width=1.2))
+                    self.ecg_plot.setTitle(
+                        f"Raw ECG + Filtered ECG live preview (about {USB_PREVIEW_FILTER_CONTEXT_SECONDS} s delay)"
+                    )
+
+                self._live_raw_curve.setData(time_axis, raw_signal)
+                self._live_filtered_curve.setData(time_axis, filtered_signal)
+                if live_heart_rate is not None and live_heart_rate.size:
+                    finite_mask = np.isfinite(live_heart_rate)
+                    if finite_mask.any():
+                        self._live_hr_curve.setData(
+                            time_axis[: live_heart_rate.size][finite_mask], live_heart_rate[finite_mask]
+                        )
+                        if self._live_hr_available is not True:
+                            self.hr_plot.setTitle("Heart-rate live trend")
+                            self._live_hr_available = True
+                        return
+                self._live_hr_curve.setData([], [])
+                if self._live_hr_available is not False:
+                    self.hr_plot.setTitle("Heart-rate live trend unavailable")
+                    self._live_hr_available = False
+                return
+
             self.ecg_plot.clear()
+            self._live_raw_curve = None
+            self._live_filtered_curve = None
+            self._live_hr_curve = None
+            self._live_hr_available = None
             self.ecg_plot.plot(time_axis, raw_signal, pen=pg.mkPen("#4C72B0", width=1.0))
             self.ecg_plot.plot(time_axis, filtered_signal, pen=pg.mkPen("#55A868", width=1.2))
-            if self.input_mode == "USB Input" and results is None:
-                self.ecg_plot.setTitle(
-                    f"Raw ECG + Filtered ECG live preview (about {USB_PREVIEW_FILTER_CONTEXT_SECONDS} s delay)"
-                )
-            else:
-                self.ecg_plot.setTitle("Full ECG: raw, filtered, and R-peaks" if results else "Raw ECG + Filtered ECG preview")
+            self.ecg_plot.setTitle("Full ECG: raw, filtered, and R-peaks" if results else "Raw ECG + Filtered ECG preview")
 
             self.hr_plot.clear()
-            if self.input_mode == "USB Input" and results is None:
-                self.hr_plot.setTitle("Heart-rate live trend")
-            else:
-                self.hr_plot.setTitle("Heart-rate over full duration")
+            self.hr_plot.setTitle("Heart-rate over full duration")
 
             if results is None:
                 if live_heart_rate is not None and live_heart_rate.size:

@@ -181,6 +181,36 @@ class TestUSBIntegration(unittest.TestCase):
         finally:
             window.close()
 
+    def test_live_preview_reuses_curves_and_clears_unavailable_heart_rate(self):
+        window = ECGDesktopApp(DiscoveryResult(("COM4",), ()))
+        raw = np.array([1.0, 2.0, 3.0])
+        filtered = raw - 1
+        try:
+            self.assertEqual(window.usb_timer.interval(), 100)
+            window._update_preview_plots(raw, filtered, None, 250, live_heart_rate=np.array([60.0, 61.0, 62.0]))
+            raw_curve, filtered_curve = window.ecg_plot.listDataItems()
+            hr_curve = window.hr_plot.listDataItems()[0]
+
+            window._update_preview_plots(raw + 1, filtered + 1, None, 250, live_heart_rate=np.full(3, np.nan))
+            self.assertEqual(window.ecg_plot.listDataItems(), [raw_curve, filtered_curve])
+            self.assertEqual(window.hr_plot.listDataItems(), [hr_curve])
+            np.testing.assert_array_equal(raw_curve.getData()[1], raw + 1)
+            np.testing.assert_array_equal(filtered_curve.getData()[1], filtered + 1)
+            hr_values = hr_curve.getData()[1]
+            self.assertTrue(hr_values is None or hr_values.size == 0)
+            self.assertEqual(window.hr_plot.plotItem.titleLabel.text, "Heart-rate live trend unavailable")
+
+            window._update_preview_plots(raw, filtered, None, 250, live_heart_rate=np.array([60.0, 61.0, 62.0]))
+            np.testing.assert_array_equal(hr_curve.getData()[1], [60.0, 61.0, 62.0])
+            self.assertEqual(window.hr_plot.plotItem.titleLabel.text, "Heart-rate live trend")
+
+            window._set_initial_plots()
+            window._update_preview_plots(raw, filtered, None, 250, live_heart_rate=np.full(3, np.nan))
+            self.assertIsNot(window.ecg_plot.listDataItems()[0], raw_curve)
+            self.assertEqual(len(window.ecg_plot.listDataItems()), 2)
+        finally:
+            window.close()
+
     def test_discontinuity_and_disconnect_preserve_without_analysis(self):
         for failure in ("gap", "disconnect"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
