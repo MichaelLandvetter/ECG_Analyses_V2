@@ -10,19 +10,19 @@ from ecg_ui import _derive_action_controls, _should_process_usb_stream_tick
 class TestECGUIModeState(unittest.TestCase):
     """Validate File/USB control state transitions."""
 
-    def test_file_mode_shows_beat_plot_and_disables_usb_controls(self) -> None:
+    def test_file_mode_hides_live_plots_and_disables_usb_controls(self) -> None:
         controls = _derive_action_controls(
             is_file_mode=True,
             acquisition_running=False,
             usb_acquisition_state="idle",
             latest_result_mode=None,
         )
-        self.assertTrue(controls["show_beat_plot"])
+        self.assertFalse(controls["show_live_plots"])
         self.assertTrue(controls["start_enabled"])
         self.assertFalse(controls["pause_enabled"])
         self.assertFalse(controls["end_enabled"])
 
-    def test_usb_mode_hides_beat_plot_and_supports_pause_resume_labels(self) -> None:
+    def test_usb_mode_shows_live_plots_and_supports_pause_resume_labels(self) -> None:
         running_controls = _derive_action_controls(
             is_file_mode=False,
             acquisition_running=True,
@@ -35,7 +35,7 @@ class TestECGUIModeState(unittest.TestCase):
             usb_acquisition_state="paused",
             latest_result_mode=None,
         )
-        self.assertFalse(running_controls["show_beat_plot"])
+        self.assertTrue(running_controls["show_live_plots"])
         self.assertEqual(running_controls["pause_text"], "Pause")
         self.assertEqual(paused_controls["pause_text"], "Resume")
         self.assertTrue(running_controls["end_enabled"])

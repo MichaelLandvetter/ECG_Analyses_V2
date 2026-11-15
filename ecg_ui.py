@@ -58,6 +58,7 @@ try:
         QMessageBox,
         QPushButton,
         QProgressDialog,
+        QStackedWidget,
         QTabWidget,
         QVBoxLayout,
         QWidget,
@@ -207,7 +208,7 @@ def _derive_action_controls(
         "end_enabled": False,
         "save_enabled": has_results,
         "review_enabled": has_results,
-        "show_beat_plot": is_file_mode,
+        "show_live_plots": not is_file_mode,
     }
 
     if is_file_mode:
@@ -610,7 +611,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_source = ""
             self.latest_result_mode: str | None = None
             self.latest_raw_signal: np.ndarray | None = None
-            self._analysis_layout_file_mode: bool | None = None
             self.processing_settings = load_processing_settings()
             self._usb_discovery: USBDiscoveryThread | None = None
 
@@ -748,19 +748,21 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.filter_mode_selector = QComboBox()
             self.filter_mode_selector.addItems(list(SUPPORTED_FILTER_MODES))
             self.filter_mode_selector.currentTextChanged.connect(self._on_filter_mode_changed)
-            layout.addWidget(self.filter_mode_selector, 0, 0, 1, 2)
+            layout.addWidget(self.filter_mode_selector, 0, 0)
 
-            layout.addWidget(QLabel("Low cut (Hz):"), 1, 0)
+            layout.addWidget(QLabel("Low cut (Hz):"), 0, 1)
             self.low_cut_input = QLineEdit(str(DEFAULT_FILTER_LOW_CUT_HZ))
-            layout.addWidget(self.low_cut_input, 1, 1)
+            self.low_cut_input.setMaximumWidth(70)
+            layout.addWidget(self.low_cut_input, 0, 2)
 
-            layout.addWidget(QLabel("High cut (Hz):"), 2, 0)
+            layout.addWidget(QLabel("High cut (Hz):"), 0, 3)
             self.high_cut_input = QLineEdit(str(DEFAULT_FILTER_HIGH_CUT_HZ))
-            layout.addWidget(self.high_cut_input, 2, 1)
+            self.high_cut_input.setMaximumWidth(70)
+            layout.addWidget(self.high_cut_input, 0, 4)
 
             apply_button = QPushButton("Apply Filter")
             apply_button.clicked.connect(self._apply_filter_preview)
-            layout.addWidget(apply_button, 3, 0, 1, 2)
+            layout.addWidget(apply_button, 1, 0, 1, 5)
 
             parent.addWidget(frame, 0, column)
 
@@ -777,31 +779,31 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
 
         def _build_action_controls(self, parent: QGridLayout, column: int) -> None:
             frame = QGroupBox("Controls")
-            layout = QVBoxLayout(frame)
+            layout = QGridLayout(frame)
 
             self.start_button = QPushButton("Start")
             self.start_button.clicked.connect(self._start_or_rerun)
-            layout.addWidget(self.start_button)
+            layout.addWidget(self.start_button, 0, 0)
 
             self.pause_resume_button = QPushButton("Pause")
             self.pause_resume_button.clicked.connect(self._pause_or_resume_usb)
-            layout.addWidget(self.pause_resume_button)
+            layout.addWidget(self.pause_resume_button, 0, 1)
 
             self.end_button = QPushButton("End")
             self.end_button.clicked.connect(self._end_usb_session)
-            layout.addWidget(self.end_button)
+            layout.addWidget(self.end_button, 0, 2)
 
             self.save_reports_button = QPushButton("Save Reports")
             self.save_reports_button.clicked.connect(self._save_reports_from_main_view)
-            layout.addWidget(self.save_reports_button)
+            layout.addWidget(self.save_reports_button, 1, 0)
 
             self.detailed_review_button = QPushButton("Open Pre-report")
             self.detailed_review_button.clicked.connect(self._open_detailed_review)
-            layout.addWidget(self.detailed_review_button)
+            layout.addWidget(self.detailed_review_button, 1, 1)
 
             reset_button = QPushButton("Reset")
             reset_button.clicked.connect(self._reset_ui)
-            layout.addWidget(reset_button)
+            layout.addWidget(reset_button, 1, 2)
 
             parent.addWidget(frame, 0, column)
 
@@ -816,17 +818,21 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.hr_plot.setLabel("bottom", "Time (s)")
             self.hr_plot.showGrid(x=True, y=True, alpha=0.3)
 
-            self.beat_plot = pg.PlotWidget(title="Beat snippets with average template")
-            self.beat_plot.setLabel("left", "Amplitude")
-            self.beat_plot.setLabel("bottom", "Time from R-peak (s)")
-            self.beat_plot.showGrid(x=True, y=True, alpha=0.3)
+            self.analysis_views = QStackedWidget()
+            self.file_analysis_message = QLabel(
+                "No data preview is shown during file analysis. Results will open in the pre-report window."
+            )
+            self.file_analysis_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.file_analysis_message.setWordWrap(True)
+            self.analysis_views.addWidget(self.file_analysis_message)
 
-            self.analysis_grid = QGridLayout()
-            self.analysis_grid.setContentsMargins(0, 0, 0, 0)
-            self.analysis_grid.setHorizontalSpacing(10)
-            self.analysis_grid.setVerticalSpacing(10)
-            parent.addLayout(self.analysis_grid)
-            self._apply_analysis_layout(is_file_mode=True)
+            live_view = QWidget()
+            live_layout = QVBoxLayout(live_view)
+            live_layout.setContentsMargins(0, 0, 0, 0)
+            live_layout.addWidget(self.ecg_plot)
+            live_layout.addWidget(self.hr_plot)
+            self.analysis_views.addWidget(live_view)
+            parent.addWidget(self.analysis_views)
 
         def _build_settings_tab(self, parent: QVBoxLayout) -> None:
             detector_group = QGroupBox("R-peak detector method")
@@ -882,10 +888,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
         def _set_initial_plots(self) -> None:
             self.ecg_plot.clear()
             self.hr_plot.clear()
-            self.beat_plot.clear()
             self.ecg_plot.setTitle("Raw ECG + Filtered ECG preview")
             self.hr_plot.setTitle("Heart-rate plot")
-            self.beat_plot.setTitle("Beat snippets with average template")
 
         def _set_status(self, status: str) -> None:
             self.status_label.setText(status)
@@ -916,22 +920,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.high_cut_input.setEnabled(is_butterworth)
 
         def _apply_analysis_layout(self, is_file_mode: bool) -> None:
-            if self._analysis_layout_file_mode == is_file_mode:
-                self.beat_plot.setVisible(is_file_mode)
-                return
-
-            self.analysis_grid.removeWidget(self.ecg_plot)
-            self.analysis_grid.removeWidget(self.hr_plot)
-            self.analysis_grid.removeWidget(self.beat_plot)
-            self.analysis_grid.addWidget(self.ecg_plot, 0, 0, 1, 2 if not is_file_mode else 1)
-            self.analysis_grid.addWidget(self.hr_plot, 1, 0, 1, 2 if not is_file_mode else 1)
-            self.analysis_grid.addWidget(self.beat_plot, 0, 1, 2, 1)
-            self.beat_plot.setVisible(is_file_mode)
-            self.analysis_grid.setColumnStretch(0, 3)
-            self.analysis_grid.setColumnStretch(1, 2 if is_file_mode else 0)
-            self.analysis_grid.setRowStretch(0, 1)
-            self.analysis_grid.setRowStretch(1, 1)
-            self._analysis_layout_file_mode = is_file_mode
+            self.analysis_views.setCurrentIndex(0 if is_file_mode else 1)
 
         def _on_source_mode_changed(self) -> None:
             is_file_mode = self.input_mode == "File Analysis"
@@ -955,7 +944,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 has_file=self.selected_file is not None,
                 usb_stream_available=False,
             )
-            self._apply_analysis_layout(is_file_mode=controls["show_beat_plot"])
+            self._apply_analysis_layout(is_file_mode=not controls["show_live_plots"])
             self.start_button.setText(str(controls["start_text"]))
             self.start_button.setEnabled(bool(controls["start_enabled"]))
             self.pause_resume_button.setText(str(controls["pause_text"]))
@@ -1047,29 +1036,8 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self._show_error("Invalid processing settings", str(exc))
                 return
 
-            if self.input_mode != "File Analysis" or not self.selected_file:
-                self.processing_settings = settings
-                self._set_status("Filter settings saved in the current session. Select a file to preview them.")
-                return
-
-            try:
-                raw_signal, _source = self._load_selected_signal(settings["sampling_rate_hz"])
-                filtered_signal = clean_ecg_signal(
-                    signal=raw_signal,
-                    sampling_rate=settings["sampling_rate_hz"],
-                    filter_mode=settings["filter_mode"],
-                    low_cut_hz=settings["filter_low_cut_hz"],
-                    high_cut_hz=settings["filter_high_cut_hz"],
-                    powerline_frequency_hz=settings["powerline_frequency_hz"],
-                )
-            except (FileNotFoundError, NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
-                self._show_error("Filter preview error", str(exc))
-                return
-
             self.processing_settings = settings
-            self.latest_raw_signal = raw_signal
-            self._update_preview_plots(raw_signal=raw_signal, filtered_signal=filtered_signal, results=None, sampling_rate=settings["sampling_rate_hz"])
-            self._set_status(f"Preview updated with {settings['filter_mode']}")
+            self._set_status(f"Filter settings applied: {settings['filter_mode']}. Re-run analysis to update results.")
             self._update_action_controls()
 
         def _start_or_rerun(self) -> None:
@@ -1117,7 +1085,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     source=source,
                     report_input_file=self.selected_file,
                     settings=settings,
-                    completion_status="File analysis complete. Results updated in Analysis View.",
+                    completion_status="File analysis complete. Opening pre-report.",
                     result_mode="file",
                 )
             except (FileNotFoundError, NeuroKit2UnavailableError, RuntimeError, ValueError) as exc:
@@ -1128,6 +1096,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self.acquisition_running = False
                 progress_dialog.close()
                 self._update_action_controls()
+            self._open_detailed_review()
 
         def _start_usb_acquisition(self) -> None:
             if self.usb_acquisition_state in {"running", "paused"}:
@@ -1347,12 +1316,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.latest_raw_signal = raw_signal
             self.latest_report_input_file = report_input_file
             self.processing_settings = settings
-            self._update_preview_plots(
-                raw_signal=np.asarray(results["artifacts"]["raw_signal"], dtype=float),
-                filtered_signal=np.asarray(results["artifacts"]["filtered_signal"], dtype=float),
-                results=results,
-                sampling_rate=settings["sampling_rate_hz"],
-            )
             self._show_analysis_tab()
             self._set_status(completion_status)
             self._update_action_controls()
@@ -1459,8 +1422,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 self.hr_plot.setTitle("Heart-rate live trend")
             else:
                 self.hr_plot.setTitle("Heart-rate over full duration")
-            self.beat_plot.clear()
-            self.beat_plot.setTitle("Beat snippets with average template overlay")
 
             if results is None:
                 if live_heart_rate is not None and live_heart_rate.size:
@@ -1492,7 +1453,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                         size=7,
                     )
                 )
-            self._plot_beat_summary(plot_widget=self.beat_plot, analysis_results=results)
 
         def _plot_beat_summary(self, plot_widget: pg.PlotWidget, analysis_results: dict[str, Any]) -> None:
             artifacts = analysis_results.get("artifacts", {})
