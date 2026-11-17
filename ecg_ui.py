@@ -945,12 +945,6 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             rolling_window_layout = QFormLayout(rolling_window_group)
             self.rolling_window_input = QLineEdit(str(DEFAULT_ROLLING_WINDOW_SECONDS))
             rolling_window_layout.addRow("Window length (s):", self.rolling_window_input)
-            rolling_window_layout.addRow(
-                QLabel(
-                    f"USB preview is delayed by approximately {USB_PREVIEW_FILTER_CONTEXT_SECONDS} seconds "
-                    "to reduce filter edge effects."
-                ),
-            )
             parent.addWidget(rolling_window_group)
 
             deferred_note = QLabel(
@@ -1238,7 +1232,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
             self.usb_recording = recording
             self.usb_preview = deque(
                 maxlen=settings["sampling_rate_hz"]
-                * (settings["rolling_window_seconds"] + 2 * USB_PREVIEW_FILTER_CONTEXT_SECONDS)
+                * (settings["rolling_window_seconds"] + USB_PREVIEW_FILTER_CONTEXT_SECONDS)
             )
             self.usb_session_settings = settings
             self.usb_stop_requested = False
@@ -1363,8 +1357,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                 return
 
             raw_signal = np.asarray(self.usb_preview, dtype=float)
-            context_samples = settings["sampling_rate_hz"] * USB_PREVIEW_FILTER_CONTEXT_SECONDS
-            preview_end = raw_signal.size - context_samples
+            preview_end = raw_signal.size
             if preview_end < 3:
                 return
 
@@ -1529,9 +1522,7 @@ if PYQT6_AVAILABLE and PYQTGRAPH_AVAILABLE:
                     self._live_raw_curve = self.ecg_plot.plot(pen=pg.mkPen("#4C72B0", width=1.0))
                     self._live_filtered_curve = self.ecg_plot.plot(pen=pg.mkPen("#55A868", width=1.2))
                     self._live_hr_curve = self.hr_plot.plot(pen=pg.mkPen("#8172B3", width=1.2))
-                    self.ecg_plot.setTitle(
-                        f"Raw ECG + Filtered ECG live preview (about {USB_PREVIEW_FILTER_CONTEXT_SECONDS} s delay)"
-                    )
+                    self.ecg_plot.setTitle("Raw ECG + Filtered ECG live preview")
 
                 self._live_raw_curve.setData(time_axis, raw_signal)
                 self._live_filtered_curve.setData(time_axis, filtered_signal)
