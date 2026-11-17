@@ -60,7 +60,7 @@ The USB view contains raw/filtered ECG and heart-rate plots. The preview shows t
 3. Use **Pause** and **Resume** as needed; paused time is excluded from the recorded samples.
 4. Click **End** to close the recording, analyse it and open the pre-report.
 
-The CSV stores raw ADC counts, device timestamps and sample indices. The recording includes comment lines marking resumed segments; analysis treats the recorded samples as continuous, so results around a pause boundary may be affected. A detected sample gap, invalid serial data or a disconnect stops recording, preserves the CSV and skips automatic analysis. Rescan the unit before starting again. The AD8232 leads-off behaviour remains as in the firmware: it streams zero, which is not distinguished from a valid zero sample.
+The CSV stores raw ADC counts, device timestamps and sample indices. The recording includes comment lines marking resumed segments; analysis treats the recorded samples as continuous, so results around a pause boundary may be affected. A detected sample gap, invalid serial data or a disconnect stops recording, preserves the CSV and skips automatic analysis. Rescan the unit before starting again. **Leads-off limitation:** the updated firmware sends `-1` when an AD8232 leads-off input is high. The main app does not detect or flag this sentinel: it records and analyzes it as an ordinary sample. A genuine ADC reading can also be `-1`, so the value alone cannot distinguish the two cases. Check electrode connections and review recordings for affected samples.
 
 ## USB Stream Tester
 
@@ -93,7 +93,7 @@ This repository also includes an ESP32-S3 firmware sketch and a standalone USB E
    1234,567,16384
    ```
 
-The ADS1115 is configured for single-ended A1 readings at 860 SPS conversion rate (single-shot reads need well under 4 ms to sustain the 250 Hz stream) and gain `GAIN_ONE`. If either AD8232 leads-off input is high, the firmware streams `0` for that sample. The CSV format is unchanged, so the Python tester needs no ADS1115-specific parser changes.
+The ADS1115 is configured for continuous single-ended A1 conversions at 860 SPS and gain `GAIN_ONE`; the firmware reads the latest conversion at a nominal 250 Hz. If either AD8232 leads-off input is high, the firmware streams `-1` for that sample. The three-column CSV format is unchanged, but `-1` is ambiguous and the main app treats it as an ordinary sample, as noted above.
 
 ### Run the standalone tester
 
